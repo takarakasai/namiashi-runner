@@ -26,7 +26,6 @@ sbus = { path = "../sbus/crates/sbus" }
 sbus-protocol = { path = "../sbus/crates/sbus-protocol" }
 misarta = { path = "../misarta" }
 quadruped-gait = { path = "../quadruped-gait/quadruped-gait" }
-legged-estimation = { path = "../quadruped-gait/legged-estimation" }
 
 # ── 外部 crate ──
 nalgebra = "0.34.2"

@@ -53,7 +53,9 @@ cargo test
 ```
 
 必要な兄弟ディレクトリ: `misa-actuator`, `misarta`, `misa-wbc`,
-`quadruped-gait`, `wit-imu`, `sbus`。
+`quadruped-gait`, `wit-imu`, `sbus`。**新しいマシン（SBC など）では
+`./scripts/bootstrap.sh`** が同じ相対配置に clone してビルドまでやる。
+移行手順は [`doc/handover.md` §5](doc/handover.md)。
 
 ## 使い方
 
