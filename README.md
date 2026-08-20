@@ -42,20 +42,38 @@ UART の割り当ては `spec_rev2_0_0_asbuilt.md` §4 のとおり:
 
 ## ビルド
 
-依存はすべて `dp/` 以下のローカルチェックアウトへの path 依存で、
-`quadruped-gait` が git URL で参照する `misarta` / `misa-wbc` は
-ルート `Cargo.toml` の `[patch]` で同じチェックアウトに寄せてある。
+依存はすべて GitHub の**公開**リポジトリへの git 依存なので、新しいマシン
+（SBC など）でも兄弟チェックアウトは要らない。SSH 鍵も認証情報も要らない。
 
 ```sh
-cd dp/namiashi-runner
-cargo build --release
+git clone https://github.com/takarakasai/namiashi-runner.git
+cd namiashi-runner
+cargo build --release      # 依存は cargo が GitHub から取ってくる
 cargo test
 ```
 
-必要な兄弟ディレクトリ: `misa-actuator`, `misarta`, `misa-wbc`,
-`quadruped-gait`, `wit-imu`, `sbus`。**新しいマシン（SBC など）では
-`./scripts/bootstrap.sh`** が同じ相対配置に clone してビルドまでやる。
-移行手順は [`doc/handover.md` §5](doc/handover.md)。
+Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB / ビルドも速い）:
+
+```sh
+cargo build --release --no-default-features
+```
+
+### 兄弟クレートも一緒に直したいとき
+
+`misa-actuator` や `sbus` を namiashi-runner と併行して直す場合だけ、
+path override を張る:
+
+```sh
+./scripts/dev-siblings.sh          # 兄弟を clone / 更新し .cargo/config.toml に [patch] を書く
+./scripts/dev-siblings.sh --off    # git 依存へ戻す
+```
+
+**これを実行していない間、ローカルの兄弟チェックアウトへの変更はビルドに
+反映されない。** cargo は `Cargo.lock` が指す GitHub の revision を見る。
+「直したのに変わらない」の原因はたいていこれ。`cargo tree -p namiashi-hal`
+で解決先（ローカルパスか git URL か）が確認できる。
+
+`.cargo/config.toml` は追跡していない（人ごと・マシンごとに違うため）。
 
 ## 使い方
 

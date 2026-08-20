@@ -1,10 +1,8 @@
 # namiashi-runner — 実機 namiashi（LKMTech ×12 + RC サーボ ×1）の制御アプリ。
 #
-# 依存はすべて `dp/` 以下のローカルチェックアウトへの path 依存にしてある。
-# `quadruped-gait` は `misarta` / `misa-wbc` を git URL で参照しているので、
-# 下の `[patch]` で同じローカルチェックアウトへ寄せ、型が二重に生えないように
-# している（cargo は git ソースを URL 文字列で識別するため、URL は
-# quadruped-gait/Cargo.toml の綴りと一字一句同じでなければならない）。
+# 依存はすべて GitHub の公開リポジトリへの git 依存。新しいマシン（SBC など）では
+# `git clone && cargo build` だけで立ち上がる。ローカルの兄弟チェックアウトで
+# 併行開発したいときは `./scripts/dev-siblings.sh` を使う。
 [workspace]
 resolver = "2"
 members = ["crates/namiashi-hal", "crates/namiashi-runner"]
@@ -18,14 +16,24 @@ authors = ["Takara Kasai <takara.kasai@gmail.com>"]
 [workspace.dependencies]
 namiashi-hal = { path = "crates/namiashi-hal" }
 
-# ── ローカル crate ──
-misa-actuator = { path = "../misa-actuator/crates/misa-actuator" }
-lkmotor-driver = { path = "../misa-actuator/crates/lkmotor-driver" }
-wit-imu = { path = "../wit-imu/crates/wit-imu" }
-sbus = { path = "../sbus/crates/sbus" }
-sbus-protocol = { path = "../sbus/crates/sbus-protocol" }
-misarta = { path = "../misarta" }
-quadruped-gait = { path = "../quadruped-gait/quadruped-gait" }
+# ── 自前の crate（git 依存）──
+#
+# すべて https の公開リポジトリなので、SBC では `git clone && cargo build` だけで
+# 済む（SSH 鍵も認証情報も要らない）。**misarta / misa-wbc の URL は
+# quadruped-gait/Cargo.toml の綴りと一字一句同じでなければならない** —
+# cargo は git ソースを URL 文字列で識別するので、`git@` 形式や末尾 `.git` の
+# 有無が違うだけで別ソース扱いになり、misarta の型が二重に生えてビルドが通らない。
+#
+# ローカルの兄弟チェックアウトで併行開発したいときは
+# `./scripts/dev-siblings.sh` を実行する（`.cargo/config.toml` に path override を
+# 書き出す。このファイルは追跡していない）。
+misa-actuator = { git = "https://github.com/takarakasai/misa-actuator.git", package = "misa-actuator" }
+lkmotor-driver = { git = "https://github.com/takarakasai/misa-actuator.git", package = "lkmotor-driver" }
+wit-imu = { git = "https://github.com/takarakasai/wit-imu.git", package = "wit-imu" }
+sbus = { git = "https://github.com/takarakasai/sbus.git", package = "sbus" }
+sbus-protocol = { git = "https://github.com/takarakasai/sbus.git", package = "sbus-protocol" }
+misarta = { git = "https://github.com/takarakasai/misarta.git" }
+quadruped-gait = { git = "https://github.com/takarakasai/quadruped-gait.git", package = "quadruped-gait" }
 
 # ── 外部 crate ──
 nalgebra = "0.34.2"
@@ -40,12 +48,6 @@ libc = "0.2"
 # GUI に描かせる。任意機能で、`--no-default-features` で Zenoh ごと外れる。
 zenoh = "1.9"
 serde_json = "1"
-
-[patch."https://github.com/takarakasai/misarta.git"]
-misarta = { path = "../misarta" }
-
-[patch."https://github.com/takarakasai/misa-wbc.git"]
-misa-wbc = { path = "../misa-wbc" }
 
 [profile.release]
 # 制御ループのジッタを抑えるため。debug=true はシンボルだけで速度には影響しない。

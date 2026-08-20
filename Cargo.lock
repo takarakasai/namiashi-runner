@@ -1757,6 +1757,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lkmotor-driver"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 dependencies = [
  "lkmotor-protocol",
  "log",
@@ -1768,6 +1769,7 @@ dependencies = [
 [[package]]
 name = "lkmotor-protocol"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 
 [[package]]
 name = "lock_api"
@@ -1863,6 +1865,7 @@ dependencies = [
 [[package]]
 name = "misa-actuator"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 dependencies = [
  "log",
  "thiserror 2.0.20",
@@ -1871,6 +1874,7 @@ dependencies = [
 [[package]]
 name = "misa-wbc"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/misa-wbc.git#92e42a59af30edca053ce9b61c7a74c40568753b"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -1879,6 +1883,7 @@ dependencies = [
 [[package]]
 name = "misarta"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/misarta.git#5f677580c460cb1b83203fd71ce31e6c83f39478"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -2464,6 +2469,7 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#1e561a11c88d4fbfe35ff5f224c61d986cb04eef"
 dependencies = [
  "clarabel",
  "log",
@@ -2641,18 +2647,18 @@ dependencies = [
 
 [[package]]
 name = "ref-cast"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "216e8f773d7923bcba9ceb86a86c93cabb3903a11872fc3f138c49630e50b96d"
+checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
 dependencies = [
  "ref-cast-impl",
 ]
 
 [[package]]
 name = "ref-cast-impl"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9283685feec7d69af75fb0e858d5e7378f33fe4fc699383b2916ab9273e03c"
+checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2910,6 +2916,7 @@ dependencies = [
 [[package]]
 name = "sbus"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/sbus.git#bcc7be0a348a872b69eae77b74815a6e919c4ce8"
 dependencies = [
  "libc",
  "log",
@@ -2921,6 +2928,7 @@ dependencies = [
 [[package]]
 name = "sbus-protocol"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/sbus.git#bcc7be0a348a872b69eae77b74815a6e919c4ce8"
 
 [[package]]
 name = "schannel"
@@ -4285,6 +4293,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wit-imu"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/wit-imu.git#339e7e312c3761033285e13b709451d52d89ff15"
 dependencies = [
  "log",
  "serialport",
@@ -4295,6 +4304,7 @@ dependencies = [
 [[package]]
 name = "wit-imu-protocol"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/wit-imu.git#339e7e312c3761033285e13b709451d52d89ff15"
 
 [[package]]
 name = "writeable"
@@ -4924,9 +4934,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.7"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b5c6b5976d66c1d703c4fd17d3f5e43c8cedaacf604961b171adc7130896d8"
+checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
 dependencies = [
  "yoke",
  "zerofrom",

@@ -139,83 +139,71 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 ---
 
-## 5. SBC へ移すときにやること
+## 5. SBC への移行
 
-### 5.1 何を push すればよいか
+### 5.1 リポジトリはすべて push 済み（2026-08-19 完了）
 
-2026-08-19 に全リポジトリを `git fetch` して突き合わせた結果、**push が要るのは
-2 つだけ**。残りはすでに remote と一致している。
+移行のブロッカーだった 2 件は解消した。
 
 | リポジトリ | remote | 状態 | SBC に要る？ |
-|---|---|---|:--:|
-| **namiashi-runner** | **なし** | ❌ **remote を作って push** | ✅ |
-| **wit-imu** | **なし** | ❌ **git 化して push** | ✅ |
-| misa-actuator | https://github.com/takarakasai/misa-actuator | ✅ 同期済み | ✅ |
-| misarta | git@github.com:takarakasai/misarta.git | ✅ 同期済み | ✅ |
-| misa-wbc | git@github.com:takarakasai/misa-wbc | ✅ 同期済み | ✅ |
-| quadruped-gait | git@github.com:takarakasai/quadruped-gait | ✅ 同期済み | ✅ |
-| sbus | git@github.com:takarakasai/sbus.git | ✅ 同期済み | ✅ |
-| namiashi_description | https://github.com/takarakasai/namiashi_description.git | 2 件未取得 | ❌ 不要 |
-| articara | git@github.com:takarakasai/articara.git | 未コミット多数 | ❌ 不要 |
+|---|---|:--:|:--:|
+| namiashi-runner | `github.com/takarakasai/namiashi-runner` | ✅ push 済み | ✅ clone する |
+| wit-imu | `github.com/takarakasai/wit-imu` | ✅ push 済み | — cargo が取る |
+| misa-actuator | `github.com/takarakasai/misa-actuator` | ✅ 同期済み | — cargo が取る |
+| misarta | `github.com/takarakasai/misarta` | ✅ 同期済み | — cargo が取る |
+| misa-wbc | `github.com/takarakasai/misa-wbc` | ✅ 同期済み | — cargo が取る |
+| quadruped-gait | `github.com/takarakasai/quadruped-gait` | ✅ 同期済み | — cargo が取る |
+| sbus | `github.com/takarakasai/sbus` | ✅ 同期済み | — cargo が取る |
+| namiashi_description | 〃 | 2 件未取得 | ❌ 不要（モデルは同梱） |
+| articara | 〃 | 未コミット多数 | ❌ 不要（可視化は PC 側、§5.6） |
 
-- **`namiashi_description` は SBC に要らない。** モデル（`models/namiashi.misa` +
-  `models/meshes/`）はこのリポジトリに取り込んである。
-- **`articara` も SBC に要らない。** 可視化は Zenoh 越しに PC 側で動かす（§5.6）。
-- `misa-actuator` は remote-tracking ref が古いと「140 件未 push」に見える。
-  **判断する前に必ず `git fetch` すること**（実際は同期済みだった）。
+**7 リポジトリとも https で公開**されているので、SBC に SSH 鍵も認証情報も
+要らない。依存は git 依存に切り替えたので、**兄弟チェックアウトを並べる必要も
+無くなった**。
 
-> **⚠ `wit-imu` は git リポジトリですらない。** `.git` が無く、この PC にしか
-> 存在しない。path 依存なので、SBC からは取得できずビルドが通らない。
-> **これが移行の唯一のブロッカー。**
+> `misa-actuator` は remote-tracking ref が古いと「140 件未 push」に見える。
+> 判断する前に必ず `git fetch` すること（実際は同期済みだった）。
 
 ### 5.2 移行手順
 
-**PC 側（1 回だけ）**
-
 ```sh
-# 1) wit-imu を git 化して push
-cd dp/wit-imu
-git init -b main && git add -A
-git commit -m "wit-imu: WitMotion IMU の同期シリアルドライバ"
-gh repo create takarakasai/wit-imu --private --source=. --push
-#    ↑ 公開/非公開と名前は運用に合わせて
-
-# 2) namiashi-runner に remote を付けて push
-cd ../namiashi-runner
-gh repo create takarakasai/namiashi-runner --private --source=. --push
-```
-
-**SBC 側**
-
-```sh
-# 3) 本体を clone し、兄弟リポジトリを同じ相対配置に揃える
-git clone <namiashi-runner の URL>
+# SBC 側。これだけ。
+git clone https://github.com/takarakasai/namiashi-runner.git
 cd namiashi-runner
-./scripts/bootstrap.sh            # 兄弟 6 個を clone してビルドまで
-#   ビルドを分けたいなら ./scripts/bootstrap.sh --no-build
+cargo build --release --no-default-features     # viz 不要なら軽いほう
 
-# 4) 動作確認（実機に触れない順に）
+# 実機に触れない順に確認
 ./target/release/namiashi check
-./target/release/namiashi ports   # ch9344 が入っていないとここで落ちる
+./target/release/namiashi ports        # ch9344 が入っていないとここで落ちる
 ./target/release/namiashi imu  --secs 10
 ./target/release/namiashi sbus --secs 10
-./target/release/namiashi legs --secs 10     # 指令は送らない
+./target/release/namiashi legs --secs 10        # 指令は送らない
 ```
 
-`bootstrap.sh` は既定で `--no-default-features`（Zenoh 無し）でビルドする。
-SBC 上で `--viz` を使いたいなら `cargo build --release --features viz` を別途。
+`Cargo.lock` を追跡しているので、SBC は PC とまったく同じ revision を引く。
 
-### 5.3 いずれ git 依存へ寄せる
+### 5.3 兄弟クレートを併行して直すとき
 
-いまは兄弟チェックアウトへの **path 依存**なので、SBC でも同じ配置が要る
-（`bootstrap.sh` はそれを自動化しただけで、構造は変えていない）。
+git 依存に切り替えた副作用として、**ローカルの兄弟チェックアウトへの変更は
+既定ではビルドに反映されない**。反映させたいときだけ:
 
-`wit-imu` が push できたら、`go2-gait-runner` と同じ **git 依存 + ローカル
-開発時だけ `.cargo/config.toml` で path override**（コミットしない）へ寄せる
-のが素直。そうすれば SBC 側は `git clone && cargo build` だけで済み、
-`bootstrap.sh` も兄弟の配置も要らなくなる。
+```sh
+./scripts/dev-siblings.sh          # .cargo/config.toml に [patch] を書き出す
+./scripts/dev-siblings.sh --off    # git 依存へ戻す
+```
 
-いまそうしていないのは `wit-imu` に remote が無かったから、という一点に尽きる。
+`cargo tree -p namiashi-hal` で解決先（ローカルパスか git URL か）が見える。
+**「直したのに変わらない」の原因はたいていこれ。**
+
+`paths` override ではなく `[patch]` を使っているのは、前者が workspace 継承
+された依存（`sbus-protocol = { workspace = true }` など）と噛み合わず
+「altered the original list of dependencies」の警告を出すため。
+
+`Cargo.toml` の git URL は **`quadruped-gait` が使っている綴りと一字一句
+同じでなければならない**（cargo は git ソースを URL 文字列で識別するので、
+`git@` 形式や末尾 `.git` の有無が違うだけで別ソース扱いになり、`misarta` の
+型が二重に生えてビルドが通らない）。`Cargo.lock` の `misarta` エントリが
+1 個であることで確認できる。
 
 ### 5.4 SBC 側の前提
 
@@ -224,7 +212,7 @@ SBC 上で `--viz` を使いたいなら `cargo build --release --features viz` 
 | **ch9344 ドライバ** | CH348 は標準カーネルに入っていない。SBC のカーネル向けに `nm_board/ch348/ch9344ser_linux` をビルド（DKMS 推奨）。**これが無いと `/dev/ttyCH9344USB*` が生えず、UART 番号の ioctl も使えない** |
 | **シリアルの権限** | 実行ユーザを `dialout` に入れるか udev ルールを置く。入っていないと全ポートが `Permission denied` |
 | **Rust** | edition 2024 を使うので **1.85 以上** |
-| **ビルド時間** | PC（32 コア）で release 44 秒 / CPU 時間 10 分。4 コアの SBC なら 10〜20 分を見込む。`clarabel` と `zenoh` が重い |
+| **ビルド時間** | PC（32 コア）で release 44 秒 / CPU 時間 10 分。4 コアの SBC なら 10〜20 分を見込む。`clarabel` と `zenoh` が重い（`--no-default-features` なら zenoh が丸ごと消える） |
 | **バイナリサイズ** | release 283 MB（`debug = true` のため）。`--no-default-features`（viz 無し）で 62 MB、`strip` すると 20 MB。SBC のストレージが厳しければ strip して配る |
 
 ### 5.5 リアルタイム性
@@ -255,14 +243,13 @@ sudo chrt -f 50 ./namiashi run --config config/namiashi.toml
 | **腕サーボの品種** | 未定（追って連絡）。初期検討は受信機直結。`ArmProtocol` に variant を足して `ArmServo` を実装すれば `is_app_driven() = true` になり、チキンヘッドと挨拶の腕動作が自動で有効になる |
 | **`sign` / `zero_pose_rad` / 可動域** | 全 12 軸未校正。`calib` で確定させる |
 | **トルク制御** | `JointMode::Torque` の口は空けてあるが未使用。MPC / WBC へ進むのは位置制御で歩いてから。LKMTech の MIT はホスト側エミュレーション（`measure` + `set_torque` の 2 往復）なので通信レートが半分になる |
-| **git remote / CI** | remote 未設定。兄弟クレートは全部 `.github/workflows/ci.yml` を持っているので、remote を作ったら合わせる |
+| **CI** | 兄弟クレートは全部 `.github/workflows/ci.yml` を持っているが、ここはまだ無い。remote はできたので足せる状態 |
 
 ---
 
 ## 7. 次にやること（推奨順）
 
-1. **`wit-imu` をリポジトリ化して push** + **`namiashi-runner` に remote**
-   （§5.1 / §5.2。SBC 移行の唯一のブロッカー）
+1. ~~`wit-imu` の push / `namiashi-runner` の remote~~ — **2026-08-19 完了**
 2. **モータに通電して `namiashi legs`** — 各バスの実効周期を測り、
    `control.rate_hz` を決める。ここが全ての前提
 3. **`calib` を 12 軸ぶん**（`scan` → `range` → `move` → `zero`）。
