@@ -1,0 +1,801 @@
+//! 脚 12 軸 = RS485 バス 4 本 × LKMTech V3 モータ 3 個。
+//!
+//! # なぜバスごとにスレッドなのか
+//!
+//! RS485 は半二重の要求応答で、1 トランザクションは「送って、相手の返事を
+//! 待つ」。待ち時間は USB の往復レイテンシに律速され、ワイヤ上のビット時間
+//! （1 Mbps で 13 バイトなら 130 µs）より桁で大きい。したがってバスを跨いだ
+//! 並列化だけが効き、同一バス内は直列にしかならない。`misa-actuator` の
+//! `doc/handover.md` が「1 バス 1 制御ループ」を推す理由でもある。
+//!
+//! # なぜ自由走行なのか
+//!
+//! 制御ループがバスの完了を待つ形にすると、制御周期の上限が**最も遅い
+//! バス**で決まってしまい、しかもそれが何 Hz なのかは実機を繋ぐまで
+//! 分からない。ここでは各バスを自由走行させ、制御ループは共有スロットへ
+//! 目標を書き最新値を読むだけにしてある。実際に出ている周期は
+//! [`BusStats`] で観測できるので、「まず測ってから制御周期を決める」が
+//! できる。
+//!
+//! # 座標変換
+//!
+//! 上位はモデル（URDF / `.misa`）の関節角だけを扱う。実機との差は
+//! [`crate::config::MotorConfig`] の `sign` と `zero_pose_rad` に閉じている。
+//!
+//! ```text
+//! q_motor = sign * (q_model - zero_pose_rad)
+//! q_model = sign *  q_motor + zero_pose_rad          (sign = ±1)
+//! ```
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use lkmotor_driver::{Motor, MotorConfig as LkMotorConfig, MotorId, Rs485Driver};
+
+use crate::ch348::PortMap;
+use crate::config::{HardwareConfig, LegBusConfig, LegsConfig, MotorConfig};
+use crate::error::{Error, Result};
+use crate::joint::{JointCommand, JointMode, JointState, LegSlot};
+
+/// 1 本のバスの稼働統計。制御周期を決めるための一次データ。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BusStats {
+    /// 完了した周回数。
+    pub ticks: u64,
+    /// トランザクション失敗の累計（3 軸合計）。
+    pub errors: u64,
+    /// 直近 1 秒の実効周期 (Hz)。
+    pub rate_hz: f64,
+    /// 直近の周回に要した時間 (s)。3 軸分のトランザクション時間。
+    pub last_cycle_s: f64,
+    /// 起動以降の最悪周回時間 (s)。
+    pub worst_cycle_s: f64,
+}
+
+/// 1 軸のゆっくり変わる状態（State1）。
+///
+/// 電圧・温度・エラービットは State2（周期で読んでいるほう）には入っておらず、
+/// 別トランザクションが要る。制御周期で毎回読むとバス帯域の 1/2 を食うので、
+/// `status_interval_ms` ごとに 1 軸ずつ回して読む。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct JointStatus {
+    pub voltage_v: f64,
+    pub temperature_c: f64,
+    /// State1 のエラービット生値。0 なら異常なし。
+    pub error_raw: u8,
+    /// 一度でも読めたか。false の値は意味を持たない。
+    pub valid: bool,
+}
+
+impl JointStatus {
+    /// 何らかの異常ビットが立っているか。
+    pub fn faulted(&self) -> bool {
+        self.valid && self.error_raw != 0
+    }
+}
+
+/// バススレッドへの制御要求。周期指令とは別経路にしてある。
+///
+/// 位置指令は「最新の 1 個だけが意味を持つ」ので共有スロットで上書きするが、
+/// enable / ゼロ出しは 1 回ずつ確実に届く必要があるのでキューにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusRequest {
+    /// クローズドループ有効化（`0x88`）。3 軸まとめて。
+    Enable,
+    /// 停止（`0x81`）。モータは脱力する。3 軸まとめて。
+    Disable,
+    /// 現在位置をソフトゼロにする（`rezero`）。位置指令の前に 1 回必要。
+    Zero,
+    /// 1 軸だけ投入する。校正で 1 軸ずつ動かすため。
+    EnableJoint(usize),
+    /// 1 軸だけ停止する。
+    DisableJoint(usize),
+}
+
+#[derive(Debug, Default)]
+struct BusSlot {
+    cmd: Mutex<[JointCommand; 3]>,
+    state: Mutex<[JointState; 3]>,
+    stats: Mutex<BusStats>,
+    status: Mutex<[JointStatus; 3]>,
+    /// 直近のエラー文言（表示用）。エラーがなければ空。
+    last_error: Mutex<String>,
+    /// ゼロ出し済みか。位置指令はこれが立つまで送らない。
+    anchored: AtomicBool,
+}
+
+/// 1 本の脚バスへのハンドル。
+pub struct LegBus {
+    leg: LegSlot,
+    port: String,
+    slot: Arc<BusSlot>,
+    requests: Sender<BusRequest>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LegBus {
+    pub fn leg(&self) -> LegSlot {
+        self.leg
+    }
+
+    /// 実際に開いているデバイスパス。
+    pub fn port(&self) -> &str {
+        &self.port
+    }
+
+    /// 3 軸ぶんの指令を差し替える。次の周回から反映される。
+    pub fn set_commands(&self, cmds: [JointCommand; 3]) {
+        *lock(&self.slot.cmd) = cmds;
+    }
+
+    /// 最新のフィードバック。
+    pub fn state(&self) -> [JointState; 3] {
+        *lock(&self.slot.state)
+    }
+
+    pub fn stats(&self) -> BusStats {
+        *lock(&self.slot.stats)
+    }
+
+    /// 3 軸の電圧・温度・エラービット。
+    pub fn status(&self) -> [JointStatus; 3] {
+        *lock(&self.slot.status)
+    }
+
+    /// この脚のどれかに異常ビットが立っているか。
+    pub fn faulted(&self) -> bool {
+        self.status().iter().any(|s| s.faulted())
+    }
+
+    pub fn last_error(&self) -> String {
+        lock(&self.slot.last_error).clone()
+    }
+
+    /// ゼロ出し済みか。false の間、位置指令はバススレッド側で握り潰される。
+    pub fn is_anchored(&self) -> bool {
+        self.slot.anchored.load(Ordering::Relaxed)
+    }
+
+    /// 制御要求を送る。スレッドが死んでいる場合はエラー。
+    pub fn request(&self, req: BusRequest) -> Result<()> {
+        self.requests
+            .send(req)
+            .map_err(|_| Error::Config(format!("{} のバススレッドが停止しています", self.port)))
+    }
+}
+
+impl Drop for LegBus {
+    /// スレッドを止めてから戻る。
+    ///
+    /// 「落ちるアプリがモータを駆動したまま生き残る」ことがないように、
+    /// 停止フラグを立てて join する（`misa-actuator-core::Session` と同じ方針）。
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// 脚 4 本ぶん。
+pub struct LegArray {
+    buses: [LegBus; 4],
+}
+
+impl LegArray {
+    /// 設定に従って 4 本のポートを開き、バススレッドを起こす。
+    ///
+    /// 途中で失敗した場合、それまでに開いたバスは drop で畳まれる。
+    pub fn connect(cfg: &HardwareConfig) -> Result<Self> {
+        Self::connect_with(cfg, &PortMap::discover()?)
+    }
+
+    /// 事前に取った探索結果を使って開く。
+    pub fn connect_with(cfg: &HardwareConfig, map: &PortMap) -> Result<Self> {
+        let mut buses: Vec<LegBus> = Vec::with_capacity(4);
+        for leg in LegSlot::ALL {
+            let bus_cfg = cfg
+                .bus_for(leg)
+                .ok_or_else(|| Error::Config(format!("脚 {} の設定がありません", leg.prefix())))?;
+            buses.push(LegBus::spawn(leg, bus_cfg, &cfg.legs, map)?);
+        }
+        let buses: [LegBus; 4] = buses
+            .try_into()
+            .map_err(|_| Error::Config("脚バスの本数が 4 ではありません".into()))?;
+        Ok(Self { buses })
+    }
+
+    pub fn bus(&self, leg: LegSlot) -> &LegBus {
+        &self.buses[leg.index()]
+    }
+
+    pub fn buses(&self) -> &[LegBus; 4] {
+        &self.buses
+    }
+
+    /// 全バスへ同じ制御要求を送る。
+    pub fn request_all(&self, req: BusRequest) -> Result<()> {
+        for bus in &self.buses {
+            bus.request(req)?;
+        }
+        Ok(())
+    }
+
+    /// 12 軸ぶんの指令をまとめて書く。並びは `[leg][hip, thigh, calf]`。
+    pub fn set_all(&self, cmds: &[[JointCommand; 3]; 4]) {
+        for (bus, c) in self.buses.iter().zip(cmds.iter()) {
+            bus.set_commands(*c);
+        }
+    }
+
+    /// 12 軸ぶんの最新値。
+    pub fn states(&self) -> [[JointState; 3]; 4] {
+        [
+            self.buses[0].state(),
+            self.buses[1].state(),
+            self.buses[2].state(),
+            self.buses[3].state(),
+        ]
+    }
+
+    /// 全軸が直近のトランザクションに成功しているか。
+    pub fn all_ok(&self) -> bool {
+        self.states().iter().flatten().all(|s| s.ok)
+    }
+
+    /// 異常ビットが立っている軸を `(脚, 軸番号, 状態)` で返す。
+    pub fn faults(&self) -> Vec<(LegSlot, usize, JointStatus)> {
+        let mut out = Vec::new();
+        for bus in &self.buses {
+            for (k, st) in bus.status().iter().enumerate() {
+                if st.faulted() {
+                    out.push((bus.leg(), k, *st));
+                }
+            }
+        }
+        out
+    }
+
+    /// 全バスがゼロ出し済みか。
+    pub fn all_anchored(&self) -> bool {
+        self.buses.iter().all(|b| b.is_anchored())
+    }
+
+    /// 全バスがゼロ出しを終えるまで待つ。
+    pub fn wait_anchored(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.all_anchored() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Error::Timeout {
+            what: "脚のゼロ出し".into(),
+            timeout,
+        })
+    }
+}
+
+/// モデル ↔ モータの座標変換と可動域を持つ 1 軸ぶんの写像。
+#[derive(Debug, Clone, Copy)]
+struct JointMap {
+    sign: f64,
+    zero_pose_rad: f64,
+    min_rad: f64,
+    max_rad: f64,
+}
+
+impl JointMap {
+    fn new(m: &MotorConfig) -> Self {
+        Self {
+            sign: m.sign,
+            zero_pose_rad: m.zero_pose_rad,
+            min_rad: m.min_rad,
+            max_rad: m.max_rad,
+        }
+    }
+
+    /// モデル角 → モータ出力軸角。可動域でクランプしてから変換する。
+    fn to_motor(self, q_model: f64) -> f64 {
+        let clamped = q_model.clamp(self.min_rad, self.max_rad);
+        self.sign * (clamped - self.zero_pose_rad)
+    }
+
+    /// モータ出力軸角 → モデル角。
+    fn to_model(self, q_motor: f64) -> f64 {
+        self.sign * q_motor + self.zero_pose_rad
+    }
+
+    /// 速度・トルクは符号だけ。
+    fn rate_to_model(self, v_motor: f64) -> f64 {
+        self.sign * v_motor
+    }
+}
+
+impl LegBus {
+    /// **1 本だけ**開く。校正のように 1 脚しか触らない用途向け。
+    ///
+    /// [`LegArray::connect`] は 4 本まとめて開くので、1 脚を調べるだけでも
+    /// 残り 3 本のポートを掴んでしまう。触る範囲は要る分だけにしたい。
+    pub fn open(cfg: &HardwareConfig, leg: LegSlot, map: &PortMap) -> Result<Self> {
+        let bus_cfg = cfg
+            .bus_for(leg)
+            .ok_or_else(|| Error::Config(format!("脚 {} の設定がありません", leg.prefix())))?;
+        Self::spawn(leg, bus_cfg, &cfg.legs, map)
+    }
+
+    /// 探索から自分でやる版。
+    pub fn open_alone(cfg: &HardwareConfig, leg: LegSlot) -> Result<Self> {
+        Self::open(cfg, leg, &PortMap::discover()?)
+    }
+
+    fn spawn(
+        leg: LegSlot,
+        bus_cfg: &LegBusConfig,
+        legs: &LegsConfig,
+        map: &PortMap,
+    ) -> Result<Self> {
+        let port = bus_cfg.port.resolve_with(map)?;
+        let timeout = Duration::from_millis(legs.response_timeout_ms);
+        let driver = Rs485Driver::open(&port, legs.baud, timeout).map_err(|e| match e {
+            lkmotor_driver::Error::SerialPort(source) => Error::OpenPort {
+                port: port.clone(),
+                source,
+            },
+            other => Error::Motor {
+                port: port.clone(),
+                motor_id: 0,
+                source: other,
+            },
+        })?;
+
+        let motor_cfg = match legs.torque_constant_nm_per_a {
+            Some(kt) => LkMotorConfig::new(legs.gear_ratio as f32, kt as f32),
+            // Kt 未知のうちは電流 (A) をそのままトルク API に通す。
+            None => LkMotorConfig::current_units(legs.gear_ratio as f32),
+        };
+
+        let mut motors = Vec::with_capacity(3);
+        let mut maps = Vec::with_capacity(3);
+        for m in &bus_cfg.motors {
+            let id = MotorId::new(m.id)
+                .ok_or_else(|| Error::Config(format!("モータ id {} は範囲外です", m.id)))?;
+            motors.push(Motor::new(id, motor_cfg));
+            maps.push(JointMap::new(m));
+        }
+        let motors: [Motor; 3] = motors
+            .try_into()
+            .map_err(|_| Error::Config("脚あたりのモータは 3 個です".into()))?;
+        let maps: [JointMap; 3] = maps
+            .try_into()
+            .map_err(|_| Error::Config("脚あたりのモータは 3 個です".into()))?;
+
+        let slot = Arc::new(BusSlot::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+
+        let worker = BusWorker {
+            leg,
+            port: port.clone(),
+            driver,
+            motors,
+            maps,
+            period: Duration::from_secs_f64(1.0 / legs.bus_rate_hz),
+            default_max_speed: legs.default_max_speed_rad_s,
+            max_target_rate: legs.max_target_rate_rad_s,
+            issued: [None; 3],
+            status_interval: Duration::from_millis(legs.status_interval_ms),
+            next_status: Instant::now(),
+            status_cursor: 0,
+            slot: Arc::clone(&slot),
+            stop: Arc::clone(&stop),
+            requests: rx,
+        };
+        let thread = std::thread::Builder::new()
+            .name(format!("leg-{}", leg.prefix()))
+            .spawn(move || worker.run())?;
+
+        Ok(LegBus {
+            leg,
+            port,
+            slot,
+            requests: tx,
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+struct BusWorker {
+    leg: LegSlot,
+    port: String,
+    driver: Rs485Driver,
+    motors: [Motor; 3],
+    maps: [JointMap; 3],
+    period: Duration,
+    default_max_speed: f64,
+    /// 目標角を 1 秒あたり何 rad まで動かしてよいか。0 で無制限。
+    max_target_rate: f64,
+    /// 実際に送っている目標角（モデル座標系）。スルーレート制限の状態。
+    /// `None` は「まだ一度も位置指令を出していない」。
+    issued: [Option<f64>; 3],
+    /// State1 を読む間隔。0 で読まない。
+    status_interval: Duration,
+    next_status: Instant,
+    /// 次に State1 を読む軸。1 周回で 1 軸だけ読み、帯域を食わないようにする。
+    status_cursor: usize,
+    slot: Arc<BusSlot>,
+    stop: Arc<AtomicBool>,
+    requests: Receiver<BusRequest>,
+}
+
+impl BusWorker {
+    fn run(mut self) {
+        let mut next = Instant::now();
+        let mut window_start = Instant::now();
+        let mut window_ticks = 0u64;
+        let mut last_cycle = Instant::now();
+
+        while !self.stop.load(Ordering::Relaxed) {
+            match self.drain_requests() {
+                Ok(()) => {}
+                Err(Disconnected) => break,
+            }
+
+            let cycle_start = Instant::now();
+            // スルーレート制限に使う実経過時間。目標周期ではなく実測を使う
+            // のは、バスが遅れている間に目標だけ規定どおり進んでしまうと
+            // 制限の意味が無くなるため。
+            let dt = last_cycle.elapsed().as_secs_f64().min(0.5);
+            last_cycle = Instant::now();
+            let cmds = *lock(&self.slot.cmd);
+            let mut states = [JointState::default(); 3];
+            let mut errors = 0u64;
+
+            for k in 0..3 {
+                match self.step_joint(k, &cmds[k], dt) {
+                    Ok(state) => states[k] = state,
+                    Err(e) => {
+                        errors += 1;
+                        // 直近の値を残したまま ok だけ落とす。位置が 0 に
+                        // 化けて上位が「原点にいる」と誤認するほうが危険。
+                        states[k] = JointState {
+                            ok: false,
+                            ..lock(&self.slot.state)[k]
+                        };
+                        *lock(&self.slot.last_error) = format!("{} 軸{k}: {e}", self.leg.prefix());
+                    }
+                }
+            }
+            *lock(&self.slot.state) = states;
+            self.poll_status();
+
+            let cycle = cycle_start.elapsed().as_secs_f64();
+            window_ticks += 1;
+            {
+                let mut st = lock(&self.slot.stats);
+                st.ticks += 1;
+                st.errors += errors;
+                st.last_cycle_s = cycle;
+                st.worst_cycle_s = st.worst_cycle_s.max(cycle);
+                let elapsed = window_start.elapsed().as_secs_f64();
+                if elapsed >= 1.0 {
+                    st.rate_hz = window_ticks as f64 / elapsed;
+                    window_ticks = 0;
+                    window_start = Instant::now();
+                }
+            }
+
+            // 目標周期に満たなければ休む。超過している場合は詰めずに
+            // 「今から次の周期」に置き直す（遅れを取り返そうとして
+            // バスを叩き続けると、遅れの原因ごと悪化させるだけ）。
+            next += self.period;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now;
+            }
+        }
+
+        // 出るときは必ず脱力させる。
+        for motor in &mut self.motors {
+            let _ = motor.disable(&mut self.driver);
+        }
+        log::info!(
+            "{} ({}) のバススレッドを停止しました",
+            self.leg.prefix(),
+            self.port
+        );
+    }
+
+    /// 1 軸ぶんのトランザクション。
+    fn step_joint(
+        &mut self,
+        k: usize,
+        cmd: &JointCommand,
+        dt: f64,
+    ) -> lkmotor_driver::Result<JointState> {
+        let map = self.maps[k];
+        let anchored = self.slot.anchored.load(Ordering::Relaxed);
+        let fb = match cmd.mode {
+            // ゼロ出し前の位置指令は送らない。アンカーが無いまま
+            // `set_position` を呼ぶと driver 側が弾くが、ここで
+            // 状態読みに落としておけば起動直後もフィードバックは回る。
+            JointMode::Position if anchored => {
+                let speed = if cmd.max_speed_rad_s > 0.0 {
+                    cmd.max_speed_rad_s
+                } else {
+                    self.default_max_speed
+                };
+                let target = self.slew(k, cmd.position_rad, dt);
+                self.motors[k].set_position(
+                    &mut self.driver,
+                    map.to_motor(target) as f32,
+                    speed as f32,
+                )?
+            }
+            JointMode::Torque => {
+                // モデル座標のトルクをモータ座標へ。符号だけ。
+                self.issued[k] = None;
+                self.motors[k].set_torque(&mut self.driver, (map.sign * cmd.torque_nm) as f32)?
+            }
+            JointMode::Idle | JointMode::Position => {
+                // 位置制御をしていない間は履歴を捨てる。次に位置制御へ入る
+                // ときは「今いるところ」から出発させたい。
+                self.issued[k] = None;
+                self.motors[k].measure(&mut self.driver)?
+            }
+        };
+        Ok(JointState {
+            position_rad: map.to_model(fb.position_rad as f64),
+            velocity_rad_s: map.rate_to_model(fb.velocity_rad_per_s as f64),
+            torque_nm: map.rate_to_model(fb.torque_nm as f64),
+            temperature_c: fb.temperature_c as f64,
+            ok: true,
+        })
+    }
+
+    /// 目標角の変化を `max_target_rate` [rad/s] で頭打ちにする。
+    ///
+    /// モータ側の速度上限（`set_position` の第 2 引数）とは別物。あちらは
+    /// 「軸が何 rad/s で回るか」で、こちらは「**目標そのもの**が何 rad/s で
+    /// 動くか」。歩容の切り替えや IK のクランプで目標が跳んだとき、あちらは
+    /// 上限速度で追いに行ってしまう。ここで目標側を鈍らせておくと、跳びが
+    /// そのまま脚の飛び出しにならない。
+    ///
+    /// 位置制御に入った最初の 1 回は**実測位置から**出発する。前回の目標を
+    /// 覚えたままだと、脱力中に手で動かされた分をいきなり戻しに行く。
+    fn slew(&mut self, k: usize, want: f64, dt: f64) -> f64 {
+        let from = match self.issued[k] {
+            Some(prev) => prev,
+            None => lock(&self.slot.state)[k].position_rad,
+        };
+        let target = if self.max_target_rate > 0.0 && dt > 0.0 {
+            let step = self.max_target_rate * dt;
+            from + (want - from).clamp(-step, step)
+        } else {
+            want
+        };
+        self.issued[k] = Some(target);
+        target
+    }
+
+    /// `status_interval` ごとに 1 軸だけ State1 を読む。
+    ///
+    /// 3 軸まとめて読むと 1 周回のトランザクションが倍になり、周期が目に見えて
+    /// 落ちる。1 軸ずつ回せば 1 周あたりの追加は 1 トランザクションで済み、
+    /// 3 × `status_interval` で全軸が更新される。
+    fn poll_status(&mut self) {
+        if self.status_interval.is_zero() || Instant::now() < self.next_status {
+            return;
+        }
+        self.next_status = Instant::now() + self.status_interval;
+        let k = self.status_cursor;
+        self.status_cursor = (self.status_cursor + 1) % 3;
+        match self.motors[k].read_status(&mut self.driver) {
+            Ok(st) => {
+                let entry = JointStatus {
+                    voltage_v: st.voltage_v as f64,
+                    temperature_c: st.temperature_c as f64,
+                    error_raw: st.error.raw(),
+                    valid: true,
+                };
+                let previous = lock(&self.slot.status)[k];
+                lock(&self.slot.status)[k] = entry;
+                // 新しく立った異常だけを言う。毎秒同じ行を出しても読まれない。
+                if entry.faulted() && entry.error_raw != previous.error_raw {
+                    log::error!(
+                        "{} 軸{k} で異常ビット 0x{:02X}（{:.1} V / {:.0} °C）",
+                        self.leg.prefix(),
+                        entry.error_raw,
+                        entry.voltage_v,
+                        entry.temperature_c
+                    );
+                }
+            }
+            Err(e) => log::debug!("{} 軸{k} の State1 読み出しに失敗: {e}", self.leg.prefix()),
+        }
+    }
+
+    fn drain_requests(&mut self) -> std::result::Result<(), Disconnected> {
+        loop {
+            match self.requests.try_recv() {
+                Ok(req) => self.handle_request(req),
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => return Err(Disconnected),
+            }
+        }
+    }
+
+    fn handle_request(&mut self, req: BusRequest) {
+        // 軸単位の要求はその軸だけ。校正で 1 軸ずつ動かすときに、
+        // 残り 2 軸をクローズドループへ入れてしまわないため。
+        let single;
+        let joints: &[usize] = match req {
+            BusRequest::EnableJoint(k) | BusRequest::DisableJoint(k) => {
+                if k >= 3 {
+                    log::warn!("{} に軸 {k} はありません", self.leg.prefix());
+                    return;
+                }
+                single = [k];
+                &single
+            }
+            _ => &[0, 1, 2],
+        };
+        for &k in joints {
+            let result = match req {
+                BusRequest::Enable | BusRequest::EnableJoint(_) => {
+                    self.motors[k].enable(&mut self.driver)
+                }
+                BusRequest::Disable | BusRequest::DisableJoint(_) => {
+                    self.issued[k] = None;
+                    self.motors[k].disable(&mut self.driver)
+                }
+                BusRequest::Zero => self.motors[k].rezero(&mut self.driver),
+            };
+            if let Err(e) = result {
+                *lock(&self.slot.last_error) = format!("{} 軸{k} {req:?}: {e}", self.leg.prefix());
+                log::warn!("{} 軸{k} の {req:?} に失敗: {e}", self.leg.prefix());
+                if req == BusRequest::Zero {
+                    // 3 軸そろって成功していなければアンカー済みにしない。
+                    self.slot.anchored.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        if req == BusRequest::Zero {
+            self.slot.anchored.store(true, Ordering::Relaxed);
+        }
+        // Disable ではアンカーを落とさない。`Motor::set_position` の基準は
+        // モータ自身のマルチターン角（`0x92`）に置いた絶対値なので、脱力して
+        // 外力で動かされてもゼロ点はずれない。ここで落としてしまうと、
+        // 再起立のたびに「今いる姿勢」でゼロを引き直すことになり、
+        // 校正姿勢とは無関係な原点が入ってしまう。
+    }
+}
+
+struct Disconnected;
+
+/// mutex の poison を握り潰す。
+///
+/// 制御スレッドのどこかが panic したからといって、他のバスへの指令を
+/// 止めるほうが安全とは限らない（脚が 1 本止まった四足は倒れる）。
+/// `misa_actuator::Shared` と同じ方針。
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(sign: f64, zero: f64) -> JointMap {
+        JointMap {
+            sign,
+            zero_pose_rad: zero,
+            min_rad: -3.0,
+            max_rad: 3.0,
+        }
+    }
+
+    #[test]
+    fn model_motor_transform_round_trips() {
+        for (sign, zero) in [(1.0, 0.0), (-1.0, 0.0), (1.0, 0.7), (-1.0, -0.4)] {
+            let m = map(sign, zero);
+            for q in [-1.0, 0.0, 0.25, 1.5] {
+                let back = m.to_model(m.to_motor(q));
+                assert!((back - q).abs() < 1e-12, "sign={sign} zero={zero} q={q}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_pose_angle_maps_to_motor_zero() {
+        // ゼロ出しした姿勢のモデル角は、モータ側では 0 でなければならない。
+        let m = map(-1.0, 1.3);
+        assert!(m.to_motor(1.3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn commands_are_clamped_to_the_joint_limits() {
+        let m = JointMap {
+            sign: 1.0,
+            zero_pose_rad: 0.0,
+            min_rad: -0.5,
+            max_rad: 0.5,
+        };
+        assert_eq!(m.to_motor(10.0), 0.5);
+        assert_eq!(m.to_motor(-10.0), -0.5);
+    }
+
+    /// スルーレート制限だけを取り出した参照実装。`BusWorker::slew` と同じ式で、
+    /// ワーカー（シリアルポートを持つ）を組まずに性質を試験するためのもの。
+    fn slew_step(from: f64, want: f64, rate: f64, dt: f64) -> f64 {
+        if rate > 0.0 && dt > 0.0 {
+            let step = rate * dt;
+            from + (want - from).clamp(-step, step)
+        } else {
+            want
+        }
+    }
+
+    #[test]
+    fn the_slew_limit_caps_how_far_the_target_moves_per_tick() {
+        // 3 rad/s × 2 ms = 0.006 rad。1.5 rad の跳びでもこれしか進まない。
+        let out = slew_step(0.0, 1.5, 3.0, 0.002);
+        assert!((out - 0.006).abs() < 1e-12, "{out}");
+    }
+
+    #[test]
+    fn the_slew_limit_is_symmetric_and_converges() {
+        let mut q = 0.0;
+        for _ in 0..1000 {
+            q = slew_step(q, -1.0, 3.0, 0.002);
+        }
+        assert!((q + 1.0).abs() < 1e-9, "{q}");
+    }
+
+    #[test]
+    fn a_small_move_passes_through_untouched() {
+        // 制限より小さい変化はそのまま通る（余計な遅れを入れない）。
+        let out = slew_step(0.0, 0.001, 3.0, 0.002);
+        assert!((out - 0.001).abs() < 1e-12, "{out}");
+    }
+
+    #[test]
+    fn a_zero_rate_disables_the_limit() {
+        assert_eq!(slew_step(0.0, 1.5, 0.0, 0.002), 1.5);
+    }
+
+    #[test]
+    fn a_status_with_no_reading_is_not_a_fault() {
+        // 一度も読めていない軸を「異常なし」とも「異常あり」とも言わない。
+        let unread = JointStatus::default();
+        assert!(!unread.valid);
+        assert!(!unread.faulted());
+        let ok = JointStatus {
+            valid: true,
+            error_raw: 0,
+            ..Default::default()
+        };
+        assert!(!ok.faulted());
+        let bad = JointStatus {
+            valid: true,
+            error_raw: 0x08,
+            ..Default::default()
+        };
+        assert!(bad.faulted());
+    }
+
+    #[test]
+    fn negative_sign_flips_velocity_and_torque() {
+        let m = map(-1.0, 0.9);
+        assert_eq!(m.rate_to_model(2.0), -2.0);
+    }
+}

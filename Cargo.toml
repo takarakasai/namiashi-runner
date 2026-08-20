@@ -1,0 +1,54 @@
+# namiashi-runner — 実機 namiashi（LKMTech ×12 + RC サーボ ×1）の制御アプリ。
+#
+# 依存はすべて `dp/` 以下のローカルチェックアウトへの path 依存にしてある。
+# `quadruped-gait` は `misarta` / `misa-wbc` を git URL で参照しているので、
+# 下の `[patch]` で同じローカルチェックアウトへ寄せ、型が二重に生えないように
+# している（cargo は git ソースを URL 文字列で識別するため、URL は
+# quadruped-gait/Cargo.toml の綴りと一字一句同じでなければならない）。
+[workspace]
+resolver = "2"
+members = ["crates/namiashi-hal", "crates/namiashi-runner"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Takara Kasai <takara.kasai@gmail.com>"]
+
+[workspace.dependencies]
+namiashi-hal = { path = "crates/namiashi-hal" }
+
+# ── ローカル crate ──
+misa-actuator = { path = "../misa-actuator/crates/misa-actuator" }
+lkmotor-driver = { path = "../misa-actuator/crates/lkmotor-driver" }
+wit-imu = { path = "../wit-imu/crates/wit-imu" }
+sbus = { path = "../sbus/crates/sbus" }
+sbus-protocol = { path = "../sbus/crates/sbus-protocol" }
+misarta = { path = "../misarta" }
+quadruped-gait = { path = "../quadruped-gait/quadruped-gait" }
+legged-estimation = { path = "../quadruped-gait/legged-estimation" }
+
+# ── 外部 crate ──
+nalgebra = "0.34.2"
+serialport = "4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+# ライブ可視化 (`--viz`): 各周期の姿勢を Zenoh (pure Rust) で流し、articara の
+# GUI に描かせる。任意機能で、`--no-default-features` で Zenoh ごと外れる。
+zenoh = "1.9"
+serde_json = "1"
+
+[patch."https://github.com/takarakasai/misarta.git"]
+misarta = { path = "../misarta" }
+
+[patch."https://github.com/takarakasai/misa-wbc.git"]
+misa-wbc = { path = "../misa-wbc" }
+
+[profile.release]
+# 制御ループのジッタを抑えるため。debug=true はシンボルだけで速度には影響しない。
+debug = true
+lto = "thin"

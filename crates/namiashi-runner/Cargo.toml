@@ -1,0 +1,29 @@
+[package]
+name = "namiashi-runner"
+description = "四脚ロボット namiashi の実機制御アプリ: プロポ (S.BUS) 操縦、歩容切替、ポーズ再生。"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "namiashi"
+path = "src/main.rs"
+
+[dependencies]
+namiashi-hal.workspace = true
+libc.workspace = true
+misarta.workspace = true
+quadruped-gait.workspace = true
+nalgebra.workspace = true
+serde.workspace = true
+toml.workspace = true
+log.workspace = true
+env_logger.workspace = true
+zenoh = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = ["viz"]
+# ライブ可視化。`quadruped-gait/viz` が GaitVizFrame に serde を付ける。
+viz = ["dep:zenoh", "dep:serde_json", "quadruped-gait/viz"]

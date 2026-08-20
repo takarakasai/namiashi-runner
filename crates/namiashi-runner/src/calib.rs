@@ -1,0 +1,440 @@
+//! `calib` — 実機に合わせて設定を確定させる。
+//!
+//! 起動直後の設定は `sign = +1`、`zero_pose_rad = 0`、可動域は URDF 値、という
+//! **推測**でしかない。1 軸でも符号が逆なら起立の瞬間に自壊するし、ゼロ点が
+//! 合っていなければモデル角と実機がまるで対応しない。ここはその 3 つを、
+//! 実機を 1 軸ずつ小さく動かして確定させ、設定ファイルへ書き戻す道具。
+//!
+//! ```text
+//! calib scan   [--leg FL] [--max-id 32]   応答するモータ id を数える（指令なし）
+//! calib move   --leg FL --joint thigh     1 軸だけ小さく動かして符号を決める
+//! calib range  --leg FL --joint thigh     脱力させ、手で動かして可動域を測る
+//! calib zero   [--pose constrain]         全軸ゼロ出し + zero_pose_rad を記録
+//! ```
+//!
+//! # 安全のための約束
+//!
+//! - **1 度に 1 軸しか投入しない。** `move` は対象軸だけ `EnableJoint` し、
+//!   終わったら必ず `DisableJoint` で戻す。残り 2 軸は最後まで脱力のまま。
+//! - **既定の振り幅は 5°、速度は 0.3 rad/s。** 取り違えていても壊れない大きさ。
+//! - **書き戻しは `--write` を明示したときだけ。** 測るだけなら実機の設定は
+//!   変わらない。
+
+use std::io::{BufRead, Write};
+use std::time::{Duration, Instant};
+
+use namiashi_hal::config::HardwareConfig;
+use namiashi_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
+use namiashi_hal::legs::{BusRequest, LegArray, LegBus};
+
+use crate::config::AppConfig;
+use crate::Cli;
+
+/// 軸を止めてから状態が落ち着くまでの待ち。
+const SETTLE: Duration = Duration::from_millis(300);
+
+pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    match cli.positionals.get(1).map(|s| s.as_str()) {
+        Some("scan") => scan(cfg, cli),
+        Some("move") => jog(cfg, cli),
+        Some("range") => range(cfg, cli),
+        Some("zero") => zero(cfg, cli),
+        Some(other) => Err(format!(
+            "未知の calib サブコマンド {other:?}（scan|move|range|zero）"
+        )),
+        None => Err("calib のサブコマンドを指定してください（scan|move|range|zero）".into()),
+    }
+}
+
+// ── scan ────────────────────────────────────────────────────────────────
+
+/// `calib scan` — 各脚バスで id を舐めて、応答するものを並べる。
+///
+/// **指令は出さない**（State2 の読み出しだけ）。設定に書いた id が本当に
+/// その脚に居るのか、id がぶつかっていないかを、脚を動かさずに確かめる。
+fn scan(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let max_id = cli.usize("max-id").unwrap_or(8).clamp(1, 32) as u8;
+    let only = leg_filter(cli)?;
+
+    // スキャンは設定の id 表とは無関係に舐めたいので、バスごとに専用の
+    // 設定（id 1..max_id）を組んで開く。
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        let bus_cfg = cfg
+            .hardware
+            .bus_for(leg)
+            .ok_or_else(|| format!("脚 {} の設定がありません", leg.prefix()))?;
+        print!("{} {} : ", leg.prefix(), bus_cfg.port.label());
+        let _ = std::io::stdout().flush();
+
+        let found = scan_bus(cfg, leg, max_id)?;
+        if found.is_empty() {
+            println!(
+                "応答なし（モータ電源とボーレート {} を確認）",
+                cfg.hardware.legs.baud
+            );
+        } else {
+            let expected: Vec<u8> = bus_cfg.motors.iter().map(|m| m.id).collect();
+            let ids: Vec<String> = found.iter().map(|id| id.to_string()).collect();
+            print!("id {} が応答", ids.join(", "));
+            if found != expected {
+                print!("（設定は {expected:?}。食い違っています）");
+            }
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// 1 本のバスで id 1..=max_id を舐める。
+fn scan_bus(cfg: &AppConfig, leg: LegSlot, max_id: u8) -> Result<Vec<u8>, String> {
+    // 設定の 3 軸を id 1..3 とは限らない値へ差し替えながら開き直すのは重い。
+    // ここでは 3 軸ぶんずつ束ねて、必要な回数だけ開く。
+    let mut found = Vec::new();
+    let mut id = 1u8;
+    while id <= max_id {
+        let ids: Vec<u8> = (id..=max_id.min(id + 2)).collect();
+        let probe = probe_config(cfg, leg, &ids)?;
+        let bus = LegBus::open_alone(&probe, leg).map_err(|e| e.to_string())?;
+        // 状態読み（`JointMode::Idle`）だけで数周回させ、応答したものを拾う。
+        std::thread::sleep(SETTLE);
+        for (k, probed) in ids.iter().enumerate() {
+            if bus.state()[k].ok {
+                found.push(*probed);
+            }
+        }
+        id += 3;
+    }
+    Ok(found)
+}
+
+/// スキャン用に、対象脚の 3 軸 id だけ差し替えた設定を作る。
+///
+/// 可動域は触らない（指令を出さないので使われない）。3 軸に満たないときは
+/// 最後の id を繰り返すのではなく**存在しない id で埋める**: 重複 id は
+/// `validate` が弾くし、応答を取り違える元でもある。
+fn probe_config(cfg: &AppConfig, leg: LegSlot, ids: &[u8]) -> Result<HardwareConfig, String> {
+    let mut hw = cfg.hardware.clone();
+    let bus = hw
+        .legs
+        .bus
+        .iter_mut()
+        .find(|b| b.leg_slot().ok() == Some(leg))
+        .ok_or_else(|| format!("脚 {} の設定がありません", leg.prefix()))?;
+    // 使われていない高い id で埋める（1..=32 の範囲内、かつ ids と重複しない）。
+    let mut filler = 32u8;
+    for (k, motor) in bus.motors.iter_mut().enumerate() {
+        motor.id = match ids.get(k) {
+            Some(id) => *id,
+            None => {
+                while ids.contains(&filler) {
+                    filler -= 1;
+                }
+                let f = filler;
+                filler -= 1;
+                f
+            }
+        };
+    }
+    hw.validate().map_err(|e| e.to_string())?;
+    Ok(hw)
+}
+
+// ── move（符号の確定） ───────────────────────────────────────────────────
+
+/// `calib move` — 1 軸だけを小さく動かし、モデルの + 方向かを人に確認する。
+///
+/// モータ座標で +δ 動かすので、**設定の `sign` には依存しない**。「モデルの
+/// + 方向へ動いたか」への答えがそのまま `sign` になる。
+fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let (leg, k) = target_joint(cli)?;
+    let deg = cli.f64("deg").unwrap_or(5.0);
+    let speed = cli.f64("speed").unwrap_or(0.3);
+    if !(0.5..=30.0).contains(&deg.abs()) {
+        return Err("--deg は 0.5..30 の範囲で指定してください（校正は小さく動かす）".into());
+    }
+
+    let name = joint_label(cfg, leg, k);
+    println!(
+        "{name} を モータ座標で {deg:+.1}° 動かします（速度 {speed} rad/s）。\
+         他の 2 軸は脱力のままです"
+    );
+    println!("脚が自由に動ける状態か確認してください。続けるなら Enter、やめるなら Ctrl-C");
+    let _ = read_line();
+
+    let bus = LegBus::open_alone(&cfg.hardware, leg).map_err(|e| e.to_string())?;
+    let before = measure_one(&bus, k)?;
+
+    // ゼロ出しは全軸に効く（`rezero` は軸ごとだが要求は 3 軸まとめ）。
+    // 位置指令にはアンカーが要るのでここで一度置く。
+    bus.request(BusRequest::Zero).map_err(|e| e.to_string())?;
+    std::thread::sleep(SETTLE);
+    bus.request(BusRequest::EnableJoint(k))
+        .map_err(|e| e.to_string())?;
+
+    // ここから先は必ず戻す。`?` で抜けても止まるよう、結果を受けてから返す。
+    let result = jog_once(cfg, &bus, k, before, deg.to_radians(), speed);
+    bus.set_commands([JointCommand::default(); 3]);
+    let _ = bus.request(BusRequest::DisableJoint(k));
+    std::thread::sleep(SETTLE);
+    let moved = result?;
+
+    println!(
+        "実測: {before:+.4} → {:+.4} rad（Δ {:+.4}）",
+        moved.1, moved.0
+    );
+    if moved.0.abs() < deg.to_radians() * 0.2 {
+        println!(
+            "⚠ ほとんど動いていません。モータ電源・可動域の端・機械的な干渉を確認してください"
+        );
+        return Ok(());
+    }
+
+    let positive = match cli.str("assume") {
+        Some(a) => a.starts_with('y'),
+        None => {
+            println!(
+                "この軸はモデルの **+ 方向**（URDF の関節軸まわり右ねじ）へ動きましたか？ [y/n]"
+            );
+            read_line().trim().starts_with('y')
+        }
+    };
+    let sign = if positive { 1.0 } else { -1.0 };
+    println!("{name}: sign = {sign:+.0}");
+
+    if let Some(path) = cli.str("write") {
+        let mut cfg = cfg.clone();
+        let bi = bus_index(&cfg.hardware, leg)?;
+        cfg.hardware.legs.bus[bi].motors[k].sign = sign;
+        write_config(&cfg, path)?;
+        println!("{path} に書き戻しました");
+    } else {
+        println!("（--write PATH を付けると設定に書き戻します）");
+    }
+    Ok(())
+}
+
+/// 現在位置から `delta_rad`（モータ座標）動かし、`(Δ, 到達値)` をモデル座標で返す。
+fn jog_once(
+    cfg: &AppConfig,
+    bus: &LegBus,
+    k: usize,
+    before: f64,
+    delta_rad: f64,
+    speed: f64,
+) -> Result<(f64, f64), String> {
+    // ゼロ出し直後なので、モータ座標の 0 が「今いるところ」。
+    // モデル座標の目標は `sign * delta + zero_pose` で表される点だが、
+    // sign を決めるのが目的なのでここでは設定の sign をそのまま使う
+    // （+1 と仮定して動かし、実際にどちらへ動いたかを人が見る）。
+    let map = &cfg.hardware.legs.bus[bus_index(&cfg.hardware, bus.leg())?].motors[k];
+    let target = map.sign * delta_rad + map.zero_pose_rad;
+
+    let mut cmds = [JointCommand::default(); 3];
+    cmds[k] = JointCommand {
+        mode: JointMode::Position,
+        position_rad: target,
+        max_speed_rad_s: speed,
+        torque_nm: 0.0,
+    };
+    bus.set_commands(cmds);
+
+    // スルーレート制限があるので、到達には目標差 / 制限レート ぶんかかる。
+    let travel_s = delta_rad.abs() / cfg.hardware.legs.max_target_rate_rad_s.max(0.1);
+    std::thread::sleep(Duration::from_secs_f64(travel_s + 1.0));
+
+    let after = measure_one(bus, k)?;
+    Ok((after - before, after))
+}
+
+// ── range（可動域の実測） ───────────────────────────────────────────────
+
+/// `calib range` — 脱力させ、手で端まで動かしてもらって可動域を記録する。
+///
+/// 自動で端を探しに行かないのは、探る側が壊す側になるから。人が手で押した
+/// 範囲を記録するほうが安全で、しかも「実際に組んだ機体で動く範囲」という
+/// 正しい答えが出る。
+fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let (leg, k) = target_joint(cli)?;
+    let secs = cli.f64("secs").unwrap_or(20.0);
+    let margin = cli.f64("margin").unwrap_or(0.05);
+    let name = joint_label(cfg, leg, k);
+
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let bus = array.bus(leg);
+    bus.request(BusRequest::Disable)
+        .map_err(|e| e.to_string())?;
+    std::thread::sleep(SETTLE);
+
+    println!("{name} を手でゆっくり端から端まで動かしてください（{secs:.0} 秒間 記録します）");
+    let start = Instant::now();
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    while start.elapsed().as_secs_f64() < secs {
+        std::thread::sleep(Duration::from_millis(50));
+        let s = bus.state()[k];
+        if !s.ok {
+            continue;
+        }
+        min = min.min(s.position_rad);
+        max = max.max(s.position_rad);
+        print!(
+            "\r  min {min:+.4}  max {max:+.4}  （残り {:>4.1} s）",
+            secs - start.elapsed().as_secs_f64()
+        );
+        let _ = std::io::stdout().flush();
+    }
+    println!();
+
+    if !min.is_finite() || !max.is_finite() || (max - min) < 0.05 {
+        return Err("動きが記録できませんでした（モータ電源とバスを確認してください）".into());
+    }
+    // 実測の端そのままだと、指令が機械端に当たる。内側へ `margin` 入れる。
+    let (lo, hi) = (min + margin, max - margin);
+    println!("{name}: 実測 {min:+.4}..{max:+.4} → 余裕 {margin} を引いて {lo:+.4}..{hi:+.4} rad");
+
+    if let Some(path) = cli.str("write") {
+        let mut cfg = cfg.clone();
+        let bi = bus_index(&cfg.hardware, leg)?;
+        cfg.hardware.legs.bus[bi].motors[k].min_rad = lo;
+        cfg.hardware.legs.bus[bi].motors[k].max_rad = hi;
+        write_config(&cfg, path)?;
+        println!("{path} に書き戻しました");
+    } else {
+        println!("（--write PATH を付けると設定に書き戻します）");
+    }
+    Ok(())
+}
+
+// ── zero（ゼロ点の確定） ────────────────────────────────────────────────
+
+/// `calib zero` — 全 12 軸をゼロ出しし、その姿勢のモデル関節角を記録する。
+///
+/// LKMTech V3 の位置制御は `rezero` で置いたソフトゼロからの相対量なので、
+/// 「**どの姿勢でゼロ出ししたか**」が分からないとモデル角と対応が付かない。
+/// `--pose <名前>` でその姿勢を `.misa` のポーズ名として指定する。
+fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let pose_name = cli
+        .str("pose")
+        .unwrap_or(&cfg.control.start_pose)
+        .to_string();
+    let robot = crate::robot::load_from_config(cfg)?;
+    let pose = robot.poses.pose(&pose_name).ok_or_else(|| {
+        format!(
+            "姿勢 {pose_name:?} がモデルにありません（{:?}）",
+            robot.poses.pose_names().collect::<Vec<_>>()
+        )
+    })?;
+    let angles = robot
+        .poses
+        .resolve(&pose.angles, crate::jointvec::JointVec::zeros());
+
+    println!("ロボットを姿勢 {pose_name:?} に保持してください:");
+    for (name, q) in angles.iter_named() {
+        println!("  {name:<18} {q:+.4} rad ({:+.1}°)", q.to_degrees());
+    }
+    println!("保持できたら Enter（Ctrl-C で中止）");
+    let _ = read_line();
+
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .request_all(BusRequest::Zero)
+        .map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+    println!("ゼロ出し完了");
+
+    let mut out = cfg.clone();
+    for leg in LegSlot::ALL {
+        let bi = bus_index(&out.hardware, leg)?;
+        for k in 0..3 {
+            out.hardware.legs.bus[bi].motors[k].zero_pose_rad = angles.legs[leg.index()][k];
+        }
+    }
+    match cli.str("write") {
+        Some(path) => {
+            write_config(&out, path)?;
+            println!("{path} に zero_pose_rad を書き戻しました");
+        }
+        None => println!("（--write PATH を付けると zero_pose_rad を書き戻します）"),
+    }
+    Ok(())
+}
+
+// ── 共通 ────────────────────────────────────────────────────────────────
+
+fn leg_filter(cli: &Cli) -> Result<Option<LegSlot>, String> {
+    match cli.str("leg") {
+        None => Ok(None),
+        Some(s) => LegSlot::from_prefix(&s.to_ascii_uppercase())
+            .map(Some)
+            .ok_or_else(|| format!("--leg {s:?} が不正です（FL/FR/RL/RR）")),
+    }
+}
+
+/// `--leg` と `--joint` から対象を決める。どちらも必須。
+fn target_joint(cli: &Cli) -> Result<(LegSlot, usize), String> {
+    let leg = leg_filter(cli)?.ok_or("--leg FL|FR|RL|RR が必要です")?;
+    let joint = cli
+        .str("joint")
+        .ok_or("--joint hip|thigh|calf が必要です")?;
+    let k = LEG_JOINT_KINDS
+        .iter()
+        .position(|kind| *kind == joint)
+        .ok_or_else(|| format!("--joint {joint:?} が不正です（hip|thigh|calf）"))?;
+    Ok((leg, k))
+}
+
+fn joint_label(cfg: &AppConfig, leg: LegSlot, k: usize) -> String {
+    let id = cfg
+        .hardware
+        .bus_for(leg)
+        .and_then(|b| b.motors.get(k))
+        .map(|m| m.id)
+        .unwrap_or(0);
+    format!("{}_{}_joint (id {id})", leg.prefix(), LEG_JOINT_KINDS[k])
+}
+
+fn bus_index(hw: &HardwareConfig, leg: LegSlot) -> Result<usize, String> {
+    hw.legs
+        .bus
+        .iter()
+        .position(|b| b.leg_slot().ok() == Some(leg))
+        .ok_or_else(|| format!("脚 {} の設定がありません", leg.prefix()))
+}
+
+/// 1 軸の現在角（モデル座標系）。バススレッドが 1 周するのを待ってから読む。
+fn measure_one(bus: &LegBus, k: usize) -> Result<f64, String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let s = bus.state()[k];
+        if s.ok {
+            return Ok(s.position_rad);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "{} 軸{k} が応答しません（{}）",
+        bus.leg().prefix(),
+        bus.last_error()
+    ))
+}
+
+/// 設定を書き出す。
+///
+/// **コメントは保たれない**（`AppConfig` から作り直すため）。`config` サブ
+/// コマンドが生成したファイルを校正で上書きしていく運用を前提にしている。
+fn write_config(cfg: &AppConfig, path: &str) -> Result<(), String> {
+    cfg.validate()?;
+    let text = cfg.to_toml()?;
+    std::fs::write(path, text).map_err(|e| format!("{path} に書けません: {e}"))
+}
+
+fn read_line() -> String {
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    line
+}

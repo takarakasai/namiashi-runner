@@ -1,0 +1,248 @@
+[control]
+model = "models/namiashi.misa"
+rate_hz = 200.0
+transition_s = 1.5
+start_pose = "constrain"
+kinematics_pose = "extend"
+teleop_timeout_ms = 100
+
+[gait]
+stance_height_m = 0.2
+swing_height_m = 0.03
+max_vx_m_s = 0.15
+max_vy_m_s = 0.08
+max_wz_rad_s = 0.6
+height_range_m = 0.04
+crawl_use_linear = false
+
+[teleop.vx]
+channel = 2
+raw_min = 172
+raw_center = 992
+raw_max = 1811
+reverse = false
+deadband = 0.06
+expo = 0.0
+
+[teleop.vy]
+channel = 1
+raw_min = 172
+raw_center = 992
+raw_max = 1811
+reverse = true
+deadband = 0.06
+expo = 0.0
+
+[teleop.wz]
+channel = 4
+raw_min = 172
+raw_center = 992
+raw_max = 1811
+reverse = true
+deadband = 0.06
+expo = 0.0
+
+[teleop.height]
+channel = 3
+raw_min = 172
+raw_center = 992
+raw_max = 1811
+reverse = false
+deadband = 0.06
+expo = 0.0
+
+[teleop.mode]
+channel = 5
+thresholds = [
+    582,
+    1401,
+]
+
+[teleop.gait]
+channel = 6
+thresholds = [
+    582,
+    1401,
+]
+
+[teleop.pose]
+channel = 7
+thresholds = [992]
+
+[teleop.chicken_head]
+channel = 8
+thresholds = [992]
+
+[teleop.arm]
+channel = 9
+raw_min = 172
+raw_center = 992
+raw_max = 1811
+reverse = false
+deadband = 0.0
+expo = 0.0
+
+[poses]
+greeting = "greeting"
+chicken_head_base_rad = 0.0
+chicken_head_gain = 1.0
+chicken_head_tau_s = 0.05
+
+[hardware.legs]
+baud = 1000000
+response_timeout_ms = 5
+bus_rate_hz = 500.0
+gear_ratio = 10.0
+default_max_speed_rad_s = 8.0
+max_target_rate_rad_s = 3.0
+status_interval_ms = 1000
+
+[[hardware.legs.bus]]
+leg = "FL"
+
+[hardware.legs.bus.port]
+uart = 0
+
+[[hardware.legs.bus.motors]]
+kind = "hip"
+id = 1
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -0.785
+max_rad = 1.05
+
+[[hardware.legs.bus.motors]]
+kind = "thigh"
+id = 2
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus.motors]]
+kind = "calf"
+id = 3
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus]]
+leg = "FR"
+
+[hardware.legs.bus.port]
+uart = 1
+
+[[hardware.legs.bus.motors]]
+kind = "hip"
+id = 1
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -1.05
+max_rad = 0.785
+
+[[hardware.legs.bus.motors]]
+kind = "thigh"
+id = 2
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus.motors]]
+kind = "calf"
+id = 3
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus]]
+leg = "RL"
+
+[hardware.legs.bus.port]
+uart = 2
+
+[[hardware.legs.bus.motors]]
+kind = "hip"
+id = 1
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -0.785
+max_rad = 1.05
+
+[[hardware.legs.bus.motors]]
+kind = "thigh"
+id = 2
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus.motors]]
+kind = "calf"
+id = 3
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus]]
+leg = "RR"
+
+[hardware.legs.bus.port]
+uart = 3
+
+[[hardware.legs.bus.motors]]
+kind = "hip"
+id = 1
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -1.05
+max_rad = 0.785
+
+[[hardware.legs.bus.motors]]
+kind = "thigh"
+id = 2
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[[hardware.legs.bus.motors]]
+kind = "calf"
+id = 3
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.62
+max_rad = 2.62
+
+[hardware.imu]
+baud = 921600
+response_timeout_ms = 50
+mount_offset_rad = [
+    0.0,
+    0.0,
+    0.0,
+]
+
+[hardware.imu.port]
+uart = 5
+
+[hardware.sbus]
+stale_after_ms = 100
+
+[hardware.sbus.port]
+uart = 6
+
+[hardware.arm]
+protocol = "receiver_direct"
+baud = 115200
+id = 1
+sign = 1.0
+zero_pose_rad = 0.0
+min_rad = -2.3
+max_rad = 0.85
+
+[hardware.arm.port]
+uart = 4
