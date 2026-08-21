@@ -168,13 +168,23 @@ impl LegBus {
     }
 }
 
+impl LegBus {
+    /// 停止フラグを立てるだけ。join はしない。
+    ///
+    /// [`LegArray`] が 4 本まとめて畳むときに、**先に全部へ知らせる**ために
+    /// 使う。1 本ずつ「立てて join」を繰り返すと停止が直列化する。
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 impl Drop for LegBus {
     /// スレッドを止めてから戻る。
     ///
     /// 「落ちるアプリがモータを駆動したまま生き残る」ことがないように、
     /// 停止フラグを立てて join する（`misa-actuator-core::Session` と同じ方針）。
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.signal_stop();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -184,6 +194,19 @@ impl Drop for LegBus {
 /// 脚 4 本ぶん。
 pub struct LegArray {
     buses: [LegBus; 4],
+}
+
+impl Drop for LegArray {
+    /// **先に 4 本すべてへ停止を知らせてから**、各バスの drop に join させる。
+    ///
+    /// これが無いと `buses` が順に drop され、1 本ずつ「フラグを立てて join」に
+    /// なる。バスが停止に気付くのは 1 周の切れ目なので、モータが無応答で 1 周が
+    /// 長いときに**停止時間が 4 倍**になる（実測: 1 周 10 秒 → 終了に 41 秒）。
+    fn drop(&mut self) {
+        for bus in &self.buses {
+            bus.signal_stop();
+        }
+    }
 }
 
 impl LegArray {
@@ -460,6 +483,12 @@ impl BusWorker {
             let mut errors = 0u64;
 
             for k in 0..3 {
+                // 軸の切れ目でも停止を見る。無応答のモータが混ざると 1 軸で
+                // 秒単位かかることがあり、周期の切れ目まで待つと Ctrl-C が
+                // そのぶん遅れる。
+                if self.stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 match self.step_joint(k, &cmds[k], dt) {
                     Ok(state) => states[k] = state,
                     Err(e) => {
@@ -505,9 +534,26 @@ impl BusWorker {
             }
         }
 
-        // 出るときは必ず脱力させる。
-        for motor in &mut self.motors {
-            let _ = motor.disable(&mut self.driver);
+        // 出るときは脱力させる。ただし**応答が取れている軸だけ**。
+        //
+        // 届かない軸へ投げても意味が無いうえに高くつく。モータ電源が OFF だと
+        // CH348 の write が 1 回おきに約 5.2 秒詰まる（実測。pyserial で
+        // 13 バイトを連続送信すると 0.3ms → 5203ms → 0.2ms → 5120ms）。
+        // 3 軸ぶん投げると停止に 15 秒級かかる。
+        //
+        // 安全性は損なわない。こちらから届かないモータは、こちらが励磁して
+        // いるモータではない（電源が無いか経路が切れている）。届く軸には
+        // 従来どおり必ず disable を送る。
+        let reachable = *lock(&self.slot.state);
+        for (k, motor) in self.motors.iter_mut().enumerate() {
+            if reachable[k].ok {
+                let _ = motor.disable(&mut self.driver);
+            } else {
+                log::debug!(
+                    "{} 軸{k} は応答が無いので disable を省略しました",
+                    self.leg.prefix()
+                );
+            }
         }
         log::info!(
             "{} ({}) のバススレッドを停止しました",
