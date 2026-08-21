@@ -47,6 +47,68 @@ fn role_of(uart: u16) -> &'static str {
     }
 }
 
+/// リンク状態と、落ちている場合はその理由。
+///
+/// `link=false` だけだと「送信機が OFF」「電波が弱い」「受信が途切れた」の
+/// どれなのか分からず、立ち上げで切り分けられない。受信機はフェイルセーフ中でも
+/// フレームを送り続ける（`sbus/doc/spec.md` §6.2: 送信機 OFF でも 66.5 fps 継続）
+/// ので、**fps が出ていることはリンクが生きている証拠にならない。**
+fn link_status(state: &namiashi_hal::sbus::SbusState, ok: bool) -> String {
+    if ok {
+        return "link=OK".to_string();
+    }
+    let mut why: Vec<&str> = Vec::new();
+    if state.failsafe {
+        why.push("FAILSAFE");
+    }
+    if state.frame_lost {
+        why.push("FRAME_LOST");
+    }
+    if why.is_empty() {
+        // フラグは立っていないのに使えない = 最後のフレームから
+        // control.teleop_timeout_ms 以上経っている。
+        why.push("TIMEOUT");
+    }
+    format!("link=NG({})", why.join("+"))
+}
+
+/// S.BUS2 テレメトリの表示。
+///
+/// **送信機（プロポ本体）のバッテリ電圧は取れない。** テレメトリは
+/// 受信機 → 送信機の向きに流れるもので、送信機自身の電池電圧は送信機の画面が
+/// 出しているだけで S.BUS 線には乗らない。ここで読めるのは受信機側の 2 つ:
+///
+/// - `Rx-Batt` — 受信機の電源電圧（スロット 0 marker `0xC0`）
+/// - `Ext-Volt` — 受信機の外部電圧入力（同 `0xC4`）。主電源を分圧して入れておけば
+///   走行用バッテリの電圧がここに出る
+///
+/// どちらも **S.BUS2 でないと来ない**（S.BUS1 にはテレメトリスロットが無い）。
+/// 未受信は `---` で、0 V と紛れないようにする。
+fn telemetry(state: &namiashi_hal::sbus::SbusState) -> String {
+    fn volts(value: Option<f32>) -> String {
+        match value {
+            Some(v) => format!("{v:.1}V"),
+            None => "---".to_string(),
+        }
+    }
+    if !state.sbus2 {
+        return "S.BUS1(テレメトリ無)".to_string();
+    }
+    // 未知 marker は捨てられて external_v が**古い値のまま残る**。黙って
+    // 古い電圧を信じないよう、増えていることを常に見せる。
+    let unknown = if state.counters.unknown_slots > 0 {
+        format!(" unknown={}", state.counters.unknown_slots)
+    } else {
+        String::new()
+    };
+    format!(
+        "S.BUS2 Rx-Batt={} Ext-Volt={}{}",
+        volts(state.rx_battery_v),
+        volts(state.external_v),
+        unknown
+    )
+}
+
 /// `sbus` — プロポの入力を表示し続ける。モータには触れない。
 pub fn sbus(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
     let rx = SbusReceiver::connect(&cfg.hardware.sbus).map_err(|e| e.to_string())?;
@@ -67,7 +129,7 @@ pub fn sbus(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
             .collect();
         println!(
             "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} chicken={} \
-             arm={} link={} frames={} desync={}",
+             arm={} {} {} {:.0}fps frames={} desync={}",
             raw.join(" "),
             cmd.vx_m_s,
             cmd.vy_m_s,
@@ -81,11 +143,25 @@ pub fn sbus(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
                 Some(q) => format!("{q:+.3}rad"),
                 None => "-".to_string(),
             },
-            cmd.link_ok,
+            link_status(&state, cmd.link_ok),
+            telemetry(&state),
+            state.fps,
             state.counters.frames,
             state.counters.desync_bytes,
         );
         std::thread::sleep(Duration::from_millis(200));
+    }
+    let state = rx.state();
+    if !state.sbus2 {
+        println!(
+            "\n注意: S.BUS1 で受信しています（テレメトリスロットが来ないので\n\
+             Rx-Batt / Ext-Volt は取れません）。受信機の S.BUS2 ポートに繋いでください。"
+        );
+    } else if state.rx_battery_v.is_none() && state.external_v.is_none() {
+        println!(
+            "\n注意: S.BUS2 ですがスロット 0 が一度も来ていません（slots={} unknown={}）。",
+            state.counters.slots, state.counters.unknown_slots
+        );
     }
     Ok(())
 }
