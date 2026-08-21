@@ -46,10 +46,19 @@ UART の割り当ては `spec_rev2_0_0_asbuilt.md` §4 のとおり:
 （SBC など）でも兄弟チェックアウトは要らない。SSH 鍵も認証情報も要らない。
 
 ```sh
-git clone https://github.com/takarakasai/namiashi-runner.git
+git clone --recurse-submodules https://github.com/takarakasai/namiashi-runner.git
 cd namiashi-runner
 cargo build --release      # 依存は cargo が GitHub から取ってくる
 cargo test
+```
+
+**`--recurse-submodules` を忘れないこと。** `models/` は
+[`namiashi_description`](https://github.com/takarakasai/namiashi_description) の
+submodule で、モデル（`.misa`）と meshes がそこにある。忘れると `models/` が
+空のままで `check` が「読み込みに失敗」になる。後から入れるなら:
+
+```sh
+git submodule update --init
 ```
 
 Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB / ビルドも速い）:
@@ -192,7 +201,7 @@ namiashi dump --gait trot --vx 0.1 --secs 60 --viz --viz-endpoint tcp/127.0.0.1:
 
 # 2) 受信側（別端末）
 cd ../articara && cargo run --release --features viz -- \
-    --model ../namiashi-runner/models/namiashi.misa
+    --model ../namiashi_description/namiashi.misa
 #   → Live gait feed パネルで endpoint に tcp/127.0.0.1:7447 を入れて Start
 ```
 

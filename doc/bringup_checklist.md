@@ -206,15 +206,16 @@ RL 420.7Hz 最悪 5.61ms   RR 417.6Hz 最悪 6.02ms      12 軸とも ok=true / 
 ./target/release/namiashi legs --secs 0 --viz --config config/namiashi.toml
 ```
 
-**PC 側:** articara を `--features viz` で起動 → `models/namiashi.misa` を開く →
-Live gait feed パネルにキー `go2/gait/planned` を入れて Start。
-
-モデルは SBC 側にあるので、PC に持っていく:
+**PC 側:** モデルは `namiashi_description` に置いてあるので clone するだけでよい
+（SBC から scp する必要は無い。SBC 側の `models/` も同じものの submodule）。
 
 ```sh
-scp takara@192.168.0.21:~/work/namiashi-runner/models/namiashi.misa .
-scp -r takara@192.168.0.21:~/work/namiashi-runner/models/meshes .
+git clone https://github.com/takarakasai/namiashi_description.git
+cd ../articara && cargo run --release --features viz -- \
+    --model ../namiashi_description/namiashi.misa
 ```
+
+articara で Live gait feed パネルにキー `go2/gait/planned` を入れて Start。
 
 **ネットワーク:** 同一 LAN でマルチキャストが通れば設定不要
 （SBC は `224.0.0.224:7446` で scout し、`tcp/192.168.0.21:<動的ポート>` で待つ）。

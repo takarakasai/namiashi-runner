@@ -167,8 +167,8 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 ### 5.2 移行手順
 
 ```sh
-# SBC 側。これだけ。
-git clone https://github.com/takarakasai/namiashi-runner.git
+# SBC 側。これだけ。--recurse-submodules を忘れると models/ が空になる。
+git clone --recurse-submodules https://github.com/takarakasai/namiashi-runner.git
 cd namiashi-runner
 cargo build --release --no-default-features     # viz 不要なら軽いほう
 
