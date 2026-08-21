@@ -356,19 +356,47 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
     array
-        .request_all(BusRequest::Zero)
-        .map_err(|e| e.to_string())?;
-    array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
-    println!("ゼロ出し完了");
+    // フレーム確立直後の 1 回目は turn 追従が始まったばかりなので、
+    // 数周ぶん回してから読む。
+    std::thread::sleep(Duration::from_millis(300));
 
+    // **モータには何も書かない。** いまの絶対角と、保持している姿勢の
+    // モデル角との差を求めるだけ。
+    //
+    //   q_model = sign * q_abs + zero_pose_rad
+    //   → zero_pose_rad = q_model_保持姿勢 - sign * q_abs
+    //
+    // 現在の状態は古い zero_pose_rad で変換済みなので、そこから絶対角を
+    // 逆算する（sign * q_abs = q_model_現在 - zero_pose_rad_旧）。
     let mut out = cfg.clone();
     for leg in LegSlot::ALL {
         let bi = bus_index(&out.hardware, leg)?;
+        let state = array.bus(leg).state();
         for k in 0..3 {
-            out.hardware.legs.bus[bi].motors[k].zero_pose_rad = angles.legs[leg.index()][k];
+            if !state[k].ok {
+                return Err(format!(
+                    "{} 軸{k} の状態が読めません（モータ電源とバスを確認してください）",
+                    leg.prefix()
+                ));
+            }
+            let old = cfg.hardware.legs.bus[bi].motors[k].zero_pose_rad;
+            let sign_q_abs = state[k].position_rad - old;
+            let held = angles.legs[leg.index()][k];
+            out.hardware.legs.bus[bi].motors[k].zero_pose_rad = held - sign_q_abs;
         }
+    }
+    println!("オフセットを求めました（モータには何も書いていません）:");
+    for leg in LegSlot::ALL {
+        let bi = bus_index(&out.hardware, leg)?;
+        let vals: Vec<String> = (0..3)
+            .map(|k| {
+                let v = out.hardware.legs.bus[bi].motors[k].zero_pose_rad;
+                format!("{v:+.4}")
+            })
+            .collect();
+        println!("  {} zero_pose_rad = [{}] rad", leg.prefix(), vals.join(" "));
     }
     match cli.str("write") {
         Some(path) => {

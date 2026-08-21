@@ -121,18 +121,17 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         Err(e) => log::warn!("IMU が来ていません ({e})。水平・静止として扱います"),
     }
 
+    // 位置の基準は**モータの電源 ON マルチターンフレーム**で、バススレッドが
+    // 起動時に自動で確立する。ここで姿勢を作る必要はない。
+    //
+    // かつては起動のたびに rezero していたため、**そのときの姿勢が原点**に
+    // なっていた。異常終了から再起動すると崩れた姿勢が原点になる、という
+    // 危うさもあった。いまは電源を入れ直さない限り原点は動かない。
     if !opts.skip_zero {
-        log::warn!(
-            "脚のゼロ出しを行います。**校正姿勢**（config の zero_pose_rad が指す姿勢）で \
-             保持されていることを確認してください"
-        );
-        hw.legs
-            .request_all(BusRequest::Zero)
-            .map_err(|e| e.to_string())?;
         hw.legs
             .wait_anchored(Duration::from_secs(3))
             .map_err(|e| format!("{e}（モータの電源とボーレートを確認してください）"))?;
-        log::info!("ゼロ出し完了");
+        log::info!("マルチターンフレームを確立しました");
     }
 
     let stop = install_signal_handler();

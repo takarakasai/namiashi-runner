@@ -87,7 +87,11 @@ pub enum BusRequest {
     Enable,
     /// 停止（`0x81`）。モータは脱力する。3 軸まとめて。
     Disable,
-    /// 現在位置をソフトゼロにする（`rezero`）。位置指令の前に 1 回必要。
+    /// モータの電源 ON マルチターンフレームとの差を読み直す。
+    ///
+    /// **かつては `rezero`（現在位置をソフトゼロにする）だった。** いまは
+    /// モータ自身の絶対角を基準にしているので、原点を置き直すことはない。
+    /// 起動時は自動で確立されるため、通常は送る必要がない。
     Zero,
     /// 1 軸だけ投入する。校正で 1 軸ずつ動かすため。
     EnableJoint(usize),
@@ -417,6 +421,8 @@ impl LegBus {
             status_interval: Duration::from_millis(legs.status_interval_ms),
             next_status: Instant::now(),
             status_cursor: 0,
+            frame_offset: [0.0; 3],
+            frame_ready: false,
             slot: Arc::clone(&slot),
             stop: Arc::clone(&stop),
             requests: rx,
@@ -454,6 +460,15 @@ struct BusWorker {
     next_status: Instant,
     /// 次に State1 を読む軸。1 周回で 1 軸だけ読み、帯域を食わないようにする。
     status_cursor: usize,
+    /// ホスト追従角 → **モータの電源 ON マルチターンフレーム**への差 (rad)。
+    ///
+    /// `Motor::measure`（`0x9C`）が返す位置は、ホスト側が `raw_origin` から
+    /// 積算した相対値でしかない。一方 `0x92` はモータが電源 ON から数えている
+    /// 絶対角で、**アプリを再起動しても変わらない**。起動時に 1 回だけ両方を
+    /// 読んでその差を覚えておけば、以降は `0x9C` だけで絶対角が出せる。
+    frame_offset: [f64; 3],
+    /// [`Self::establish_frame`] が成功したか。
+    frame_ready: bool,
     slot: Arc<BusSlot>,
     stop: Arc<AtomicBool>,
     requests: Receiver<BusRequest>,
@@ -470,6 +485,15 @@ impl BusWorker {
             match self.drain_requests() {
                 Ok(()) => {}
                 Err(Disconnected) => break,
+            }
+
+            if !self.frame_ready && !self.establish_frame() {
+                // 読めるようになるまで毎周期試す。モータ電源が後から入る
+                // 使い方もあるので、ここで諦めない。
+                let now = Instant::now();
+                next = next.max(now) + self.period;
+                std::thread::sleep(self.period);
+                continue;
             }
 
             let cycle_start = Instant::now();
@@ -562,6 +586,51 @@ impl BusWorker {
         );
     }
 
+    /// モータの電源 ON マルチターンフレームとの差を求める。
+    ///
+    /// 軸ごとに `0x92`（絶対角）と `0x9C`（ホスト追従角）を 1 回ずつ読み、
+    /// その差を [`Self::frame_offset`] に置く。**起動時に 1 回だけ**で、
+    /// 制御周期のトランザクション数は増えない。
+    ///
+    /// これがあると「アプリ起動のたびに原点が変わる」問題が消える。`rezero`
+    /// はホスト側にソフト原点を置くだけなので、プロセスが死ぬと失われ、次の
+    /// 起動では**そのときの姿勢**が原点になっていた。モータ自身は電源が入って
+    /// いる限りマルチターン角を保持しているので、そちらを基準にすればよい。
+    fn establish_frame(&mut self) -> bool {
+        let mut offsets = [0.0f64; 3];
+        for k in 0..3 {
+            let abs = match self.motors[k].read_absolute_angle(&mut self.driver) {
+                Ok(v) => v as f64,
+                Err(e) => {
+                    *lock(&self.slot.last_error) =
+                        format!("{} 軸{k}: 絶対角の読み出しに失敗: {e}", self.leg.prefix());
+                    return false;
+                }
+            };
+            // `measure` は turn 追従の初期化も兼ねる（`prev_raw` を埋める）。
+            let rel = match self.motors[k].measure(&mut self.driver) {
+                Ok(fb) => fb.position_rad as f64,
+                Err(e) => {
+                    *lock(&self.slot.last_error) =
+                        format!("{} 軸{k}: 状態の読み出しに失敗: {e}", self.leg.prefix());
+                    return false;
+                }
+            };
+            offsets[k] = abs - rel;
+        }
+        self.frame_offset = offsets;
+        self.frame_ready = true;
+        self.slot.anchored.store(true, Ordering::Relaxed);
+        log::info!(
+            "{} のマルチターンフレームを確立しました（オフセット {:+.4} {:+.4} {:+.4} rad）",
+            self.leg.prefix(),
+            offsets[0],
+            offsets[1],
+            offsets[2]
+        );
+        true
+    }
+
     /// 1 軸ぶんのトランザクション。
     fn step_joint(
         &mut self,
@@ -570,19 +639,19 @@ impl BusWorker {
         dt: f64,
     ) -> lkmotor_driver::Result<JointState> {
         let map = self.maps[k];
-        let anchored = self.slot.anchored.load(Ordering::Relaxed);
         let fb = match cmd.mode {
-            // ゼロ出し前の位置指令は送らない。アンカーが無いまま
-            // `set_position` を呼ぶと driver 側が弾くが、ここで
-            // 状態読みに落としておけば起動直後もフィードバックは回る。
-            JointMode::Position if anchored => {
+            // フレーム確立前の位置指令は送らない。まだ絶対角との対応が
+            // 付いていないので、送ると見当違いの位置へ動く。状態読みに
+            // 落としておけば起動直後もフィードバックは回る。
+            JointMode::Position if self.frame_ready => {
                 let speed = if cmd.max_speed_rad_s > 0.0 {
                     cmd.max_speed_rad_s
                 } else {
                     self.default_max_speed
                 };
                 let target = self.slew(k, cmd.position_rad, dt);
-                self.motors[k].set_position(
+                // **絶対マルチターン指令（0xA4）**。ソフト原点は使わない。
+                self.motors[k].set_position_absolute(
                     &mut self.driver,
                     map.to_motor(target) as f32,
                     speed as f32,
@@ -601,7 +670,8 @@ impl BusWorker {
             }
         };
         Ok(JointState {
-            position_rad: map.to_model(fb.position_rad as f64),
+            // ホスト追従角に起動時の差を足して絶対角に戻す。
+            position_rad: map.to_model(fb.position_rad as f64 + self.frame_offset[k]),
             velocity_rad_s: map.rate_to_model(fb.velocity_rad_per_s as f64),
             torque_nm: map.rate_to_model(fb.torque_nm as f64),
             temperature_c: fb.temperature_c as f64,
@@ -705,7 +775,9 @@ impl BusWorker {
                     self.issued[k] = None;
                     self.motors[k].disable(&mut self.driver)
                 }
-                BusRequest::Zero => self.motors[k].rezero(&mut self.driver),
+                // Zero はフレームの張り直し。1 軸ずつではなく 3 軸まとめて
+                // やる必要があるので、ここでは何もせず下で処理する。
+                BusRequest::Zero => Ok(()),
             };
             if let Err(e) = result {
                 *lock(&self.slot.last_error) = format!("{} 軸{k} {req:?}: {e}", self.leg.prefix());
@@ -718,7 +790,12 @@ impl BusWorker {
             }
         }
         if req == BusRequest::Zero {
-            self.slot.anchored.store(true, Ordering::Relaxed);
+            // **モータには何も書かない。** マルチターンフレームとの差を
+            // 読み直すだけ。電源を入れ直した後など、フレームがずれた
+            // 可能性があるときに使う。
+            self.frame_ready = false;
+            self.slot.anchored.store(false, Ordering::Relaxed);
+            self.establish_frame();
         }
         // Disable ではアンカーを落とさない。`Motor::set_position` の基準は
         // モータ自身のマルチターン角（`0x92`）に置いた絶対値なので、脱力して
