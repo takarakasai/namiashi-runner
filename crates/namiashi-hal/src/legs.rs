@@ -97,6 +97,14 @@ pub enum BusRequest {
     EnableJoint(usize),
     /// 1 軸だけ停止する。
     DisableJoint(usize),
+    /// モータのマルチターンカウンタを 0 に戻す（`0x95`）。
+    ///
+    /// **モータ電源の OFF/ON と同じ効果**をマルチターンフレームにだけ与える。
+    /// A7Z とモータ電源が同一系統で切り分けられない開発環境で、電源を落とさずに
+    /// 「電源を入れ直した状態」を作るためのもの。
+    ///
+    /// ROM には何も書かない（`0x19` とは別物）。実行後はフレームを張り直す。
+    ClearMultiTurn,
 }
 
 #[derive(Debug, Default)]
@@ -778,6 +786,7 @@ impl BusWorker {
                 // Zero はフレームの張り直し。1 軸ずつではなく 3 軸まとめて
                 // やる必要があるので、ここでは何もせず下で処理する。
                 BusRequest::Zero => Ok(()),
+                BusRequest::ClearMultiTurn => self.motors[k].clear_multi_turn(&mut self.driver),
             };
             if let Err(e) = result {
                 *lock(&self.slot.last_error) = format!("{} 軸{k} {req:?}: {e}", self.leg.prefix());
@@ -789,12 +798,22 @@ impl BusWorker {
                 }
             }
         }
-        if req == BusRequest::Zero {
-            // **モータには何も書かない。** マルチターンフレームとの差を
+        if req == BusRequest::Zero || req == BusRequest::ClearMultiTurn {
+            // Zero は**モータには何も書かない**。マルチターンフレームとの差を
             // 読み直すだけ。電源を入れ直した後など、フレームがずれた
             // 可能性があるときに使う。
+            //
+            // ClearMultiTurn はモータ側のカウンタを 0 に戻したので、当然
+            // フレームも張り直す必要がある。
             self.frame_ready = false;
             self.slot.anchored.store(false, Ordering::Relaxed);
+            if req == BusRequest::ClearMultiTurn {
+                log::warn!(
+                    "{} のマルチターンカウンタを 0 に戻しました。\
+                     **zero_pose_rad は今の姿勢を基準に測り直すこと**",
+                    self.leg.prefix()
+                );
+            }
             self.establish_frame();
         }
         // Disable ではアンカーを落とさない。`Motor::set_position` の基準は

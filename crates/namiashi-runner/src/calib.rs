@@ -39,10 +39,13 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("move") => jog(cfg, cli),
         Some("range") => range(cfg, cli),
         Some("zero") => zero(cfg, cli),
+        Some("clear-multiturn") => clear_multiturn(cfg, cli),
         Some(other) => Err(format!(
-            "未知の calib サブコマンド {other:?}（scan|move|range|zero）"
+            "未知の calib サブコマンド {other:?}（scan|move|range|zero|clear-multiturn）"
         )),
-        None => Err("calib のサブコマンドを指定してください（scan|move|range|zero）".into()),
+        None => Err(
+            "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
+        ),
     }
 }
 
@@ -404,6 +407,60 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             println!("{path} に zero_pose_rad を書き戻しました");
         }
         None => println!("（--write PATH を付けると zero_pose_rad を書き戻します）"),
+    }
+    Ok(())
+}
+
+// ── clear-multiturn ─────────────────────────────────────────────────────
+
+/// `calib clear-multiturn` — マルチターンカウンタを 0 に戻す（`0x95`）。
+///
+/// **モータ電源の OFF/ON と同じ効果**をマルチターンフレームにだけ与える。
+/// A7Z とモータ電源が同一系統で切り分けられない開発環境で、電源を落とさずに
+/// 「電源を入れ直した状態」を作るためのもの。
+///
+/// ROM には書かない。`0x19`（`WriteCurrentPosAsZero`）とは**別物**で、
+/// あちらはフラッシュに書くので書き込み回数の上限がある。
+fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let only = leg_filter(cli)?;
+    println!("マルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。");
+    println!("**ROM には書きません。** 次に本当に電源を切れば元どおりです。");
+    println!();
+    println!("実行後、この姿勢が新しい原点になります。**zero_pose_rad は");
+    println!("この姿勢を基準に測り直してください**（calib zero）。");
+    println!("続けるなら Enter、やめるなら Ctrl-C");
+    let _ = read_line();
+
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        array
+            .bus(leg)
+            .request(BusRequest::ClearMultiTurn)
+            .map_err(|e| e.to_string())?;
+    }
+    // 各バスが 0x95 を送ってフレームを張り直すまで待つ。
+    std::thread::sleep(SETTLE);
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（フレームの張り直しに失敗しました）"))?;
+    std::thread::sleep(SETTLE);
+
+    println!();
+    println!("完了。いまの絶対角:");
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        let st = array.bus(leg).state();
+        let q: Vec<String> = st.iter().map(|s| format!("{:+.4}", s.position_rad)).collect();
+        println!("  {} q(model) = [{}] rad", leg.prefix(), q.join(" "));
     }
     Ok(())
 }

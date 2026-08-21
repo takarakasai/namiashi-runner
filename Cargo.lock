@@ -1757,7 +1757,6 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lkmotor-driver"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 dependencies = [
  "lkmotor-protocol",
  "log",
@@ -1769,7 +1768,6 @@ dependencies = [
 [[package]]
 name = "lkmotor-protocol"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 
 [[package]]
 name = "lock_api"
@@ -1865,7 +1863,6 @@ dependencies = [
 [[package]]
 name = "misa-actuator"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#5db57cf5f0344d3aaed0b4f45e8562cdcfcbf45b"
 dependencies = [
  "log",
  "thiserror 2.0.20",
@@ -1874,7 +1871,6 @@ dependencies = [
 [[package]]
 name = "misa-wbc"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-wbc.git#92e42a59af30edca053ce9b61c7a74c40568753b"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -1883,7 +1879,6 @@ dependencies = [
 [[package]]
 name = "misarta"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misarta.git#5f677580c460cb1b83203fd71ce31e6c83f39478"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -2469,7 +2464,6 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#1e561a11c88d4fbfe35ff5f224c61d986cb04eef"
 dependencies = [
  "clarabel",
  "log",
@@ -2916,7 +2910,6 @@ dependencies = [
 [[package]]
 name = "sbus"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/sbus.git#96b479e648f59bf4872c95631bcb45c48eb9bc8d"
 dependencies = [
  "libc",
  "log",
@@ -2928,7 +2921,6 @@ dependencies = [
 [[package]]
 name = "sbus-protocol"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/sbus.git#96b479e648f59bf4872c95631bcb45c48eb9bc8d"
 
 [[package]]
 name = "schannel"
@@ -4293,7 +4285,6 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wit-imu"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/wit-imu.git#339e7e312c3761033285e13b709451d52d89ff15"
 dependencies = [
  "log",
  "serialport",
@@ -4304,7 +4295,6 @@ dependencies = [
 [[package]]
 name = "wit-imu-protocol"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/wit-imu.git#339e7e312c3761033285e13b709451d52d89ff15"
 
 [[package]]
 name = "writeable"
