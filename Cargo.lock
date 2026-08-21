@@ -2916,7 +2916,7 @@ dependencies = [
 [[package]]
 name = "sbus"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/sbus.git#bcc7be0a348a872b69eae77b74815a6e919c4ce8"
+source = "git+https://github.com/takarakasai/sbus.git#96b479e648f59bf4872c95631bcb45c48eb9bc8d"
 dependencies = [
  "libc",
  "log",
@@ -2928,7 +2928,7 @@ dependencies = [
 [[package]]
 name = "sbus-protocol"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/sbus.git#bcc7be0a348a872b69eae77b74815a6e919c4ce8"
+source = "git+https://github.com/takarakasai/sbus.git#96b479e648f59bf4872c95631bcb45c48eb9bc8d"
 
 [[package]]
 name = "schannel"
