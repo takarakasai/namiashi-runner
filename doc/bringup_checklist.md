@@ -3,6 +3,7 @@
 対象: 四脚ロボット **namiashi**（LKMTech MG4005 ×12 + 腕 RC サーボ ×1）
 制御機: `radxa-cubie-a7z`
 関連: [`boot_config.md`](boot_config.md) / [`runtime_tuning.md`](runtime_tuning.md) /
+[`viz_live.md`](viz_live.md) /
 `handover.md` / `motor_map.md`
 
 作成日: 2026-08-21（実機組み上がり直後）
@@ -200,39 +201,17 @@ RL 420.7Hz 最悪 5.61ms   RR 417.6Hz 最悪 6.02ms      12 軸とも ok=true / 
 > 目標角は「指令どおりの姿勢」しか描かず、実機がその通り動いたかは映らない。
 > 取り違えると「画面で合っているから実機も合っている」と誤解する。
 
-**SBC 側:**
-
 ```sh
+# SBC
 ./target/release/namiashi legs --secs 0 --viz --config config/namiashi.toml
-```
-
-**PC 側:** モデルは `namiashi_description` に置いてあるので clone するだけでよい
-（SBC から scp する必要は無い。SBC 側の `models/` も同じものの submodule）。
-
-```sh
-git clone https://github.com/takarakasai/namiashi_description.git
-cd ../articara && cargo run --release --features viz -- \
+# PC（モデルは namiashi_description を clone するだけ。scp は要らない）
+cd articara && cargo run --release --features viz -- \
     --model ../namiashi_description/namiashi.misa
+#   → Live gait feed パネルにキー go2/gait/planned を入れて Start
 ```
 
-articara で Live gait feed パネルにキー `go2/gait/planned` を入れて Start。
-
-**ネットワーク:** 同一 LAN でマルチキャストが通れば設定不要
-（SBC は `224.0.0.224:7446` で scout し、`tcp/192.168.0.21:<動的ポート>` で待つ）。
-通らなければ SBC 側を固定ポートで待ち受けさせ、articara から繋ぐ:
-
-```sh
-# SBC。--viz-endpoint は listen 側の設定で、同時にマルチキャストを切る
-./target/release/namiashi legs --secs 0 --viz --viz-endpoint tcp/0.0.0.0:7447 --config config/namiashi.toml
-# PC の articara 側には tcp/192.168.0.21:7447 を入れる
-```
-
-直接繋がらない場合は SSH トンネルでも通る:
-
-```sh
-ssh -L 7447:127.0.0.1:7447 takara@192.168.0.21
-# SBC 側は --viz-endpoint tcp/127.0.0.1:7447、articara は tcp/127.0.0.1:7447
-```
+**手順の全体・ネットワークの 3 通り・繋がらないときの切り分けは
+[`viz_live.md`](viz_live.md) にまとめてある。**
 
 **この段階で確認できること / できないこと:**
 
