@@ -61,7 +61,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         "dump" => dump::run(&cfg, cli),
         "calib" => calib::run(&cfg, cli),
         "imu" => diag::imu(&cfg, cli.f64("secs").unwrap_or(10.0)),
-        "sbus" => diag::sbus(&cfg, cli.f64("secs").unwrap_or(10.0)),
+        "sbus" => diag::sbus(&cfg, cli.f64("secs").unwrap_or(10.0), cli.flag("plain")),
         "legs" => diag::legs(&cfg, cli.f64("secs").unwrap_or(10.0)),
         "run" => {
             let robot = robot::load_from_config(&cfg)?;
@@ -132,7 +132,9 @@ fn print_help() {
   check                     設定とモデルを検証（実機に触れない）
   dump                      歩容を実機なしで再生し、関節角と可動域を検証
   imu    [--secs S]         IMU の値を表示（モータには触れない）
-  sbus   [--secs S]         プロポ入力と解釈結果を表示（同上）
+  sbus   [--secs S] [--plain]
+                            プロポ入力と解釈結果を表示（同上）
+                            既定は再描画表示。--plain で 1 行 / 更新の逐次出力
   legs   [--secs S]         脚バスの状態と実効周期を表示（**指令は送らない**）
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
   run                       制御ループ（プロポ操縦）
@@ -191,7 +193,7 @@ pub struct Cli {
 }
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
-const BOOL_FLAGS: &[&str] = &["help", "allow-no-sbus", "skip-zero", "viz", "realtime"];
+const BOOL_FLAGS: &[&str] = &["help", "allow-no-sbus", "skip-zero", "viz", "realtime", "plain"];
 
 impl Cli {
     pub fn parse(args: impl Iterator<Item = String>) -> Self {

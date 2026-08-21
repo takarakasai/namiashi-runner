@@ -3,16 +3,17 @@
 //! 立ち上げの順番として、まずここが全部通ることを確認してから `run` へ行く。
 //! 脚の指令は一切出さず、状態読み出しと受信だけを行う。
 
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use namiashi_hal::ch348;
 use namiashi_hal::config::HardwareConfig;
 use namiashi_hal::imu::ImuReader;
 use namiashi_hal::legs::LegArray;
-use namiashi_hal::sbus::SbusReceiver;
+use namiashi_hal::sbus::{SbusReceiver, SbusState, CHANNELS};
 
 use crate::config::AppConfig;
-use crate::teleop::{Teleop, TeleopConfig};
+use crate::teleop::{OperatorCommand, Teleop, TeleopConfig};
 
 /// `ports` — CH348 のポートを物理 UART 番号つきで並べる。何も開かない。
 pub fn ports() -> Result<(), String> {
@@ -109,8 +110,204 @@ fn telemetry(state: &namiashi_hal::sbus::SbusState) -> String {
     )
 }
 
+/// ANSI のコントロールシーケンス導入部。
+const CSI: &str = "\x1b[";
+
+fn flag(value: bool) -> &'static str {
+    if value {
+        "●"
+    } else {
+        "○"
+    }
+}
+
+fn warn(value: bool) -> &'static str {
+    if value {
+        "⚠YES"
+    } else {
+        "no"
+    }
+}
+
+/// 端末の表示幅。かな・漢字は 2 桁として数える。
+///
+/// `format!("{:8}")` は**文字数**で数えるので、役割名（かな・漢字）を混ぜると
+/// 桁がずれて表がガタつく。ここは自前に数えるしかない。
+fn disp_width(s: &str) -> usize {
+    s.chars().map(char_cols).sum()
+}
+
+fn char_cols(c: char) -> usize {
+    let u = c as u32;
+    // かな・漢字・全角記号だけを 2 桁にする。棒グラフの █ · や ● ○ ⚠ は
+    // 端末側で 1 桁に描かれるので巻き込まないこと。
+    let wide = (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0x303E).contains(&u)
+        || (0x3041..=0x33FF).contains(&u)
+        || (0x3400..=0x9FFF).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u);
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
+/// 表示幅が `cols` になるまで右に空白を足す。
+fn pad(s: &str, cols: usize) -> String {
+    let mut out = s.to_string();
+    for _ in disp_width(s)..cols {
+        out.push(' ');
+    }
+    out
+}
+
+/// チャンネル値の棒グラフ。生値は 0..=2047。
+fn bar(raw: u16, cols: usize) -> String {
+    let filled = (raw as usize * cols) / 2047;
+    (0..cols)
+        .map(|i| if i < filled { '█' } else { '·' })
+        .collect()
+}
+
+/// CH 番号（1 始まり）→ 役割名。
+///
+/// 「各スティック / スイッチが期待どおりのチャンネルに出る」を確かめるのが
+/// このコマンドの主目的（`doc/bringup_checklist.md` §3-2）なので、番号だけ
+/// でなく**設定から引いた役割**を並べる。設定を変えれば表示も追従する。
+fn channel_roles(t: &TeleopConfig) -> [&'static str; CHANNELS] {
+    let mut roles = [""; CHANNELS];
+    let mut assign = vec![
+        (t.vx.channel, "前後"),
+        (t.vy.channel, "左右"),
+        (t.wz.channel, "旋回"),
+        (t.height.channel, "高さ"),
+        (t.mode.channel, "モード"),
+        (t.gait.channel, "歩容"),
+        (t.pose.channel, "ポーズ"),
+        (t.chicken_head.channel, "チキン"),
+    ];
+    if let Some(arm) = &t.arm {
+        assign.push((arm.channel, "腕"));
+    }
+    for (ch, name) in assign {
+        if (1..=CHANNELS).contains(&ch) {
+            roles[ch - 1] = name;
+        }
+    }
+    roles
+}
+
+/// 再描画表示の全行。
+///
+/// レイアウトは `board/nm_board/ch348/test/sbus_monitor.py` を踏襲した
+/// （ヘッダ + 2 列 8 行のチャンネル表）。そこに namiashi 側の**解釈結果**を
+/// 足してある。生値だけ見ても「その値でロボットが何をするつもりか」は
+/// 分からず、立ち上げで確かめたいのは後者だから。
+fn monitor_lines(
+    port: &str,
+    state: &SbusState,
+    cmd: &OperatorCommand,
+    roles: &[&'static str; CHANNELS],
+) -> Vec<String> {
+    let c = &state.counters;
+    let rule = "-".repeat(76);
+    let mut out = vec![
+        format!(
+            "namiashi sbus  {port}  100000 8E2   {:5.1} fps  frames={} slots={} desync={}",
+            state.fps, c.frames, c.slots, c.desync_bytes
+        ),
+        // link= は敢えて固定幅にしない。埋めると無駄な空白が空くうえ、
+        // 行がずれるのは「リンク状態が変わったとき」だけ = 気付いてほしい瞬間。
+        format!(
+            "{}   CH17:{}  CH18:{}   FRAME_LOST:{}   FAILSAFE:{}",
+            link_status(state, cmd.link_ok),
+            flag(state.ch17),
+            flag(state.ch18),
+            warn(state.frame_lost),
+            warn(state.failsafe),
+        ),
+        telemetry(state),
+        rule.clone(),
+    ];
+
+    if c.frames == 0 {
+        out.push("  (S.BUS フレーム待ち... 送信機と受信機の電源を確認してください)".to_string());
+    } else {
+        for row in 0..CHANNELS / 2 {
+            let cells: Vec<String> = [row * 2, row * 2 + 1]
+                .iter()
+                .map(|&k| {
+                    let v = state.channels[k];
+                    format!(
+                        "CH{:>2} {} {v:>4} {}",
+                        k + 1,
+                        pad(roles[k], 8),
+                        bar(v, 12)
+                    )
+                })
+                .collect();
+            out.push(format!("  {}", cells.join("   ")));
+        }
+    }
+
+    out.push(rule);
+    out.push(format!(
+        "  vx={:+.3} m/s   vy={:+.3} m/s   wz={:+.3} rad/s   高さ={:+.3} m",
+        cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s, cmd.height_offset_m
+    ));
+    out.push(format!(
+        "  モード={:?}   歩容={}   ポーズ={}   チキンヘッド={}   腕={}",
+        cmd.mode,
+        cmd.gait.label(),
+        if cmd.play_pose { "再生" } else { "-" },
+        if cmd.chicken_head { "on" } else { "off" },
+        match cmd.arm_rad {
+            Some(q) => format!("{q:+.3}rad"),
+            None => "-".to_string(),
+        }
+    ));
+    out
+}
+
+/// `--plain` の 1 行出力。grep やログに落とすとき用。
+fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
+    let raw: Vec<String> = state.channels[..8]
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!("{}:{v:>4}", i + 1))
+        .collect();
+    format!(
+        "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} chicken={} \
+         arm={} {} {} {:.0}fps frames={} desync={}",
+        raw.join(" "),
+        cmd.vx_m_s,
+        cmd.vy_m_s,
+        cmd.wz_rad_s,
+        cmd.height_offset_m,
+        cmd.mode,
+        cmd.gait.label(),
+        cmd.play_pose,
+        cmd.chicken_head,
+        match cmd.arm_rad {
+            Some(q) => format!("{q:+.3}rad"),
+            None => "-".to_string(),
+        },
+        link_status(state, cmd.link_ok),
+        telemetry(state),
+        state.fps,
+        state.counters.frames,
+        state.counters.desync_bytes,
+    )
+}
+
 /// `sbus` — プロポの入力を表示し続ける。モータには触れない。
-pub fn sbus(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
+///
+/// 既定は再描画表示。`plain` で 1 行 / 更新の逐次出力に切り替わる
+/// （リダイレクトやログ採取のとき、ANSI が混ざると読めないため）。
+pub fn sbus(cfg: &AppConfig, seconds: f64, plain: bool) -> Result<(), String> {
     let rx = SbusReceiver::connect(&cfg.hardware.sbus).map_err(|e| e.to_string())?;
     println!("{} で受信中（{seconds:.0} 秒）", rx.port());
     rx.wait_ready(Duration::from_secs(3))
@@ -118,39 +315,41 @@ pub fn sbus(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
 
     let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
     let timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
+    let roles = channel_roles(&cfg.teleop);
+    let port = format!("{}", rx.port());
+
+    let mut stdout = std::io::stdout();
+    if !plain {
+        // 再描画中にカーソルが踊るのを止める。最後に必ず戻す。
+        let _ = write!(stdout, "{CSI}?25l");
+    }
+    let mut previous = 0usize;
+
     let start = Instant::now();
     while start.elapsed().as_secs_f64() < seconds {
         let state = rx.state();
         let cmd = teleop.update(&state, state.is_usable(timeout));
-        let raw: Vec<String> = state.channels[..8]
-            .iter()
-            .enumerate()
-            .map(|(i, v)| format!("{}:{v:>4}", i + 1))
-            .collect();
-        println!(
-            "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} chicken={} \
-             arm={} {} {} {:.0}fps frames={} desync={}",
-            raw.join(" "),
-            cmd.vx_m_s,
-            cmd.vy_m_s,
-            cmd.wz_rad_s,
-            cmd.height_offset_m,
-            cmd.mode,
-            cmd.gait.label(),
-            cmd.play_pose,
-            cmd.chicken_head,
-            match cmd.arm_rad {
-                Some(q) => format!("{q:+.3}rad"),
-                None => "-".to_string(),
-            },
-            link_status(&state, cmd.link_ok),
-            telemetry(&state),
-            state.fps,
-            state.counters.frames,
-            state.counters.desync_bytes,
-        );
-        std::thread::sleep(Duration::from_millis(200));
+        if plain {
+            println!("{}", plain_line(&state, &cmd));
+        } else {
+            let lines = monitor_lines(&port, &state, &cmd, &roles);
+            if previous > 0 {
+                let _ = write!(stdout, "{CSI}{previous}A");
+            }
+            for line in &lines {
+                // 2K で行を消してから書く。前の行が長かったときの残骸を防ぐ。
+                let _ = writeln!(stdout, "{CSI}2K{line}");
+            }
+            previous = lines.len();
+            let _ = stdout.flush();
+        }
+        std::thread::sleep(Duration::from_millis(if plain { 200 } else { 50 }));
     }
+    if !plain {
+        let _ = write!(stdout, "{CSI}?25h");
+        let _ = stdout.flush();
+    }
+
     let state = rx.state();
     if !state.sbus2 {
         println!(
