@@ -354,10 +354,12 @@ impl LegBus {
             },
         })?;
 
-        let motor_cfg = match legs.torque_constant_nm_per_a {
-            Some(kt) => LkMotorConfig::new(legs.gear_ratio as f32, kt as f32),
+        // **減速比は軸ごとに引く。** calf だけベルト駆動でプーリ径比 1.47 が
+        // 内蔵減速機に上乗せされるため、バス共通の値では calf が 47% ずれる。
+        let motor_cfg_for = |ratio: f64| match legs.torque_constant_nm_per_a {
+            Some(kt) => LkMotorConfig::new(ratio as f32, kt as f32),
             // Kt 未知のうちは電流 (A) をそのままトルク API に通す。
-            None => LkMotorConfig::current_units(legs.gear_ratio as f32),
+            None => LkMotorConfig::current_units(ratio as f32),
         };
 
         let mut motors = Vec::with_capacity(3);
@@ -365,7 +367,7 @@ impl LegBus {
         for m in &bus_cfg.motors {
             let id = MotorId::new(m.id)
                 .ok_or_else(|| Error::Config(format!("モータ id {} は範囲外です", m.id)))?;
-            motors.push(Motor::new(id, motor_cfg));
+            motors.push(Motor::new(id, motor_cfg_for(m.gear_ratio_or(legs.gear_ratio))));
             maps.push(JointMap::new(m));
         }
         let motors: [Motor; 3] = motors

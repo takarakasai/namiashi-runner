@@ -82,6 +82,21 @@ pub struct MotorConfig {
     /// モデル座標系での可動域 (rad)。指令はここへクランプされる。
     pub min_rad: f64,
     pub max_rad: f64,
+    /// この軸だけの減速比。`None` なら [`LegsConfig::gear_ratio`] を使う。
+    ///
+    /// **calf だけベルト駆動で、プーリ径比 1.47 が MG4005 内蔵の 10:1 に
+    /// 上乗せされる**（総減速比 14.7）。脚のなかで一番負荷がかかる軸なので、
+    /// 設計上そうなっている。ここを `LegsConfig::gear_ratio` の 10.0 のまま
+    /// にすると calf の角度が 47% ずれる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gear_ratio: Option<f64>,
+}
+
+impl MotorConfig {
+    /// この軸の減速比。軸個別の指定が無ければバス共通の値。
+    pub fn gear_ratio_or(&self, bus_default: f64) -> f64 {
+        self.gear_ratio.unwrap_or(bus_default)
+    }
 }
 
 fn one() -> f64 {
@@ -405,10 +420,32 @@ impl Default for HardwareConfig {
             };
             [hip, (-2.62, 2.62), (-2.62, 2.62)]
         };
+        // 符号は設計データ由来で、実機で確認済み（2026-08-21）。
+        //
+        //   Roll  (hip)          → **前後**で反転。後ろ 2 本（RL/RR）が -1
+        //   Pitch (thigh/calf)   → **左右**で反転。右 2 本（FR/RR）が -1
+        //
+        // 軸によって反転の軸が違うので、左右対称だろうと決めてかかると外す。
+        let leg_signs = |leg: LegSlot| -> [f64; 3] {
+            let hip = match leg {
+                LegSlot::Fl | LegSlot::Fr => 1.0,
+                LegSlot::Rl | LegSlot::Rr => -1.0,
+            };
+            let pitch = match leg {
+                LegSlot::Fl | LegSlot::Rl => 1.0,
+                LegSlot::Fr | LegSlot::Rr => -1.0,
+            };
+            [hip, pitch, pitch]
+        };
+        // calf だけベルト駆動。プーリ径比 1.47 が内蔵の 10:1 に上乗せされる。
+        let leg_gear = |k: usize| -> Option<f64> {
+            (LEG_JOINT_KINDS[k] == "calf").then_some(default_gear_ratio() * 1.47)
+        };
         let bus: Vec<LegBusConfig> = LegSlot::ALL
             .iter()
             .map(|&leg| {
                 let limits = leg_limits(leg);
+                let signs = leg_signs(leg);
                 LegBusConfig {
                     leg: leg.prefix().to_string(),
                     port: PortSpec::Uart(uart_for(leg)),
@@ -416,10 +453,11 @@ impl Default for HardwareConfig {
                         .map(|k| MotorConfig {
                             kind: LEG_JOINT_KINDS[k].to_string(),
                             id: (k + 1) as u8,
-                            sign: 1.0,
+                            sign: signs[k],
                             zero_pose_rad: 0.0,
                             min_rad: limits[k].0,
                             max_rad: limits[k].1,
+                            gear_ratio: leg_gear(k),
                         })
                         .collect(),
                 }
@@ -484,6 +522,56 @@ mod tests {
     /// **`LegSlot::ALL`（FL, FR, RL, RR）の順序とは違う。** 位置で振ると
     /// FR と RL が入れ替わるので、ここで実機の配線を固定しておく
     /// （`doc/motor_map.md` の as-built 表と一致すること）。
+    /// 符号は設計データ由来で実機確認済み（2026-08-21）。
+    ///
+    /// **Roll(hip) は前後で、Pitch(thigh/calf) は左右で反転する。** 反転の軸が
+    /// 違うので「左右対称だろう」と決めてかかると外す。ここで固定しておく。
+    #[test]
+    fn default_signs_flip_roll_front_rear_and_pitch_left_right() {
+        let cfg = HardwareConfig::default();
+        let expected = [
+            (LegSlot::Fl, [1.0, 1.0, 1.0]),
+            (LegSlot::Rl, [-1.0, 1.0, 1.0]),
+            (LegSlot::Fr, [1.0, -1.0, -1.0]),
+            (LegSlot::Rr, [-1.0, -1.0, -1.0]),
+        ];
+        for (leg, signs) in expected {
+            let bus = cfg.bus_for(leg).unwrap();
+            let got: Vec<f64> = bus.motors.iter().map(|m| m.sign).collect();
+            assert_eq!(got, signs.to_vec(), "{} の符号", leg.prefix());
+        }
+    }
+
+    /// calf だけベルト駆動でプーリ径比 1.47 が内蔵の 10:1 に上乗せされる。
+    ///
+    /// バス共通の `gear_ratio` のままだと calf が 47% ずれるので、
+    /// 軸個別に持てていることと値の両方を固定する。
+    #[test]
+    fn only_calf_overrides_the_gear_ratio() {
+        let cfg = HardwareConfig::default();
+        let bus_default = cfg.legs.gear_ratio;
+        for leg in LegSlot::ALL {
+            let bus = cfg.bus_for(leg).unwrap();
+            for m in &bus.motors {
+                let expected = if m.kind == "calf" {
+                    bus_default * 1.47
+                } else {
+                    bus_default
+                };
+                assert!(
+                    (m.gear_ratio_or(bus_default) - expected).abs() < 1e-9,
+                    "{} の {} は減速比 {expected}",
+                    leg.prefix(),
+                    m.kind
+                );
+            }
+            // calf 以外は個別指定を持たない（共通値に従う）。
+            for m in bus.motors.iter().filter(|m| m.kind != "calf") {
+                assert_eq!(m.gear_ratio, None, "{} の {}", leg.prefix(), m.kind);
+            }
+        }
+    }
+
     #[test]
     fn default_wiring_is_uart0_to_3_equals_fl_rl_fr_rr() {
         let cfg = HardwareConfig::default();
