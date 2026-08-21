@@ -13,7 +13,9 @@ use namiashi_hal::legs::LegArray;
 use namiashi_hal::sbus::{SbusReceiver, SbusState, CHANNELS};
 
 use crate::config::AppConfig;
+use crate::jointvec::JointVec;
 use crate::teleop::{OperatorCommand, Teleop, TeleopConfig};
+use crate::viz::{self, VizConfig};
 
 /// `ports` — CH348 のポートを物理 UART 番号つきで並べる。何も開かない。
 pub fn ports() -> Result<(), String> {
@@ -441,7 +443,18 @@ pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
 ///
 /// ここで各バスの実効周期が出るので、`control.rate_hz` をいくつにできるかが
 /// 実測で決まる。
-pub fn legs(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
+///
+/// # `--viz` で articara に出すのは「実測角」
+///
+/// `run --viz` が流すのは**モータへ行く目標角**だが、こちらが流すのは
+/// **エンコーダから読んだ実測角**。狙いが逆で、
+///
+/// - `run --viz` … 指令どおりの姿勢を描く。実機がその通り動いたかは映らない
+/// - `legs --viz` … 実機が今どうなっているかを描く。**指令は一切出さない**
+///
+/// 立ち上げでやりたいのは後者。脚を手で動かして、画面のモデルが同じように
+/// 動くかを見れば、`(バス, id)` → 関節の対応と符号を目で確認できる。
+pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Result<(), String> {
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
     let deadline = Deadline::new(seconds);
     println!(
@@ -451,8 +464,38 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
     for bus in array.buses() {
         println!("  {} → {}", bus.leg().prefix(), bus.port());
     }
+
+    let mut publisher = crate::runner::open_viz(viz_cfg)?;
+    if publisher.is_some() {
+        println!("  ライブ可視化: **実測角**を配信します（目標角ではありません）");
+    }
+    let started = Instant::now();
+    // 表示は 500 ms ごとで十分だが、可視化はもっと細かく出したい。
+    // ループは可視化のレートで回し、テキストは間引く。
+    let text_period = Duration::from_millis(500);
+    let mut next_text = Instant::now();
+
     while deadline.running() {
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(20));
+
+        if let Some(p) = publisher.as_mut() {
+            // 実測角をそのままモデル座標系の JointVec に詰める。腕は
+            // GaitVizFrame が運ばないので 0 のまま（articara 側で動かない）。
+            let states = array.states();
+            let mut q = JointVec::zeros();
+            for (leg, leg_states) in states.iter().enumerate() {
+                for (k, s) in leg_states.iter().enumerate() {
+                    q.legs[leg][k] = s.position_rad;
+                }
+            }
+            let t = started.elapsed().as_secs_f64();
+            p.maybe_publish(|seq| viz::frame(seq, t, &q, &viz::BodyView::default()));
+        }
+
+        if Instant::now() < next_text {
+            continue;
+        }
+        next_text += text_period;
         for bus in array.buses() {
             let st = bus.stats();
             let s = bus.state();

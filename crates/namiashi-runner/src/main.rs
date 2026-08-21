@@ -62,7 +62,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         "calib" => calib::run(&cfg, cli),
         "imu" => diag::imu(&cfg, secs_or_forever(cli, 10.0)),
         "sbus" => diag::sbus(&cfg, secs_or_forever(cli, 10.0), cli.flag("plain")),
-        "legs" => diag::legs(&cfg, secs_or_forever(cli, 10.0)),
+        "legs" => diag::legs(&cfg, secs_or_forever(cli, 10.0), &viz_config(cli)),
         "run" => {
             let robot = robot::load_from_config(&cfg)?;
             let opts = runner::RunOptions {
@@ -153,7 +153,8 @@ fn print_help() {
   sbus   [--secs S] [--plain]
                             プロポ入力と解釈結果を表示（同上）
                             既定は再描画表示。--plain で 1 行 / 更新の逐次出力
-  legs   [--secs S]         脚バスの状態と実効周期を表示（**指令は送らない**）
+  legs   [--secs S] [--viz] 脚バスの状態と実効周期を表示（**指令は送らない**）
+                            --viz で**実測角**を articara へ配信（run --viz は目標角）
 
   imu / sbus / legs は --secs 0（以下）または --forever で Ctrl-C まで回り続ける。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
@@ -182,7 +183,7 @@ calib のサブコマンド:
   1 度に 1 軸しか投入せず、既定の振り幅は 5°・速度 0.3 rad/s。
   --write を付けたときだけ設定ファイルへ書き戻す。
 
-ライブ可視化のオプション（dump / run 共通）:
+ライブ可視化のオプション（dump / run / legs 共通）:
   --viz                     各周期の姿勢を Zenoh へ配信し articara に描かせる
   --viz-key KEY             Zenoh キー（既定 go2/gait/planned）
   --viz-rate HZ             配信レート（既定 50）

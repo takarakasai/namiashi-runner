@@ -246,7 +246,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
 ///
 /// `viz` フィーチャを外したビルドで `--viz` を渡されると
 /// `Publisher::new` がエラーを返す（黙って無視しない）。
-fn open_viz(cfg: &VizConfig) -> Result<Option<viz::Publisher>, String> {
+pub(crate) fn open_viz(cfg: &VizConfig) -> Result<Option<viz::Publisher>, String> {
     if !cfg.enabled {
         return Ok(None);
     }
