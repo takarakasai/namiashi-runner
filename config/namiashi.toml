@@ -90,7 +90,7 @@ chicken_head_tau_s = 0.05
 
 [hardware.legs]
 baud = 2000000
-response_timeout_ms = 5
+response_timeout_ms = 20
 bus_rate_hz = 500.0
 gear_ratio = 10.0
 default_max_speed_rad_s = 8.0
