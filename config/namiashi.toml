@@ -89,7 +89,7 @@ chicken_head_gain = 1.0
 chicken_head_tau_s = 0.05
 
 [hardware.legs]
-baud = 1000000
+baud = 2000000
 response_timeout_ms = 5
 bus_rate_hz = 500.0
 gear_ratio = 10.0
