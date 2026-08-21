@@ -381,9 +381,23 @@ impl HardwareConfig {
 
 impl Default for HardwareConfig {
     fn default() -> Self {
-        // 既定の配線: 基板の LEG1..4 (UART0..3) = FL, FR, RL, RR、
+        // 既定の配線: 基板の LEG1..4 (UART0..3) = **FL, RL, FR, RR**、
         // バス内は id 1, 2, 3 = hip, thigh, calf。
         // 可動域は namiashi.urdf の <limit> をそのまま写している。
+        //
+        // **`LegSlot::ALL`（FL, FR, RL, RR）とは順序が違う。** J14..J17 が
+        // 左列 → 右列に並ぶ基板なので、左 2 本を先に配線するのが自然な取り回し
+        // になる。`ALL` の側は `quadruped_gait::LegId::ALL` と一致させる必要が
+        // あり `JointVec` の添字にもなっているので触れない。
+        // したがって UART 割り当ては**位置ではなく明示表**で持つ。
+        let uart_for = |leg: LegSlot| -> u16 {
+            match leg {
+                LegSlot::Fl => ch348::uart::LEGS[0],
+                LegSlot::Rl => ch348::uart::LEGS[1],
+                LegSlot::Fr => ch348::uart::LEGS[2],
+                LegSlot::Rr => ch348::uart::LEGS[3],
+            }
+        };
         let leg_limits = |leg: LegSlot| -> [(f64, f64); 3] {
             let hip = match leg {
                 LegSlot::Fl | LegSlot::Rl => (-0.785, 1.05),
@@ -393,12 +407,11 @@ impl Default for HardwareConfig {
         };
         let bus: Vec<LegBusConfig> = LegSlot::ALL
             .iter()
-            .enumerate()
-            .map(|(i, &leg)| {
+            .map(|&leg| {
                 let limits = leg_limits(leg);
                 LegBusConfig {
                     leg: leg.prefix().to_string(),
-                    port: PortSpec::Uart(ch348::uart::LEGS[i]),
+                    port: PortSpec::Uart(uart_for(leg)),
                     motors: (0..3)
                         .map(|k| MotorConfig {
                             kind: LEG_JOINT_KINDS[k].to_string(),
@@ -466,12 +479,28 @@ mod tests {
         assert_eq!(cfg, back);
     }
 
+    /// 既定の配線は UART0..3 = FL, RL, FR, RR。
+    ///
+    /// **`LegSlot::ALL`（FL, FR, RL, RR）の順序とは違う。** 位置で振ると
+    /// FR と RL が入れ替わるので、ここで実機の配線を固定しておく
+    /// （`doc/motor_map.md` の as-built 表と一致すること）。
     #[test]
-    fn default_wiring_is_leg1_to_4_equals_fl_fr_rl_rr() {
+    fn default_wiring_is_uart0_to_3_equals_fl_rl_fr_rr() {
         let cfg = HardwareConfig::default();
-        for (i, leg) in LegSlot::ALL.iter().enumerate() {
-            let bus = cfg.bus_for(*leg).unwrap();
-            assert_eq!(bus.port, PortSpec::Uart(i as u16));
+        let expected = [
+            (LegSlot::Fl, 0u16),
+            (LegSlot::Rl, 1),
+            (LegSlot::Fr, 2),
+            (LegSlot::Rr, 3),
+        ];
+        for (leg, uart) in expected {
+            let bus = cfg.bus_for(leg).unwrap();
+            assert_eq!(
+                bus.port,
+                PortSpec::Uart(uart),
+                "{} は UART{uart} のはず",
+                leg.prefix()
+            );
             assert_eq!(
                 bus.motors.iter().map(|m| m.id).collect::<Vec<_>>(),
                 vec![1, 2, 3]

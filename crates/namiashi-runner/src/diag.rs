@@ -39,8 +39,8 @@ pub fn ports() -> Result<(), String> {
 fn role_of(uart: u16) -> &'static str {
     match uart {
         0 => "LEG1 (FL) RS485",
-        1 => "LEG2 (FR) RS485",
-        2 => "LEG3 (RL) RS485",
+        1 => "LEG2 (RL) RS485",
+        2 => "LEG3 (FR) RS485",
         3 => "LEG4 (RR) RS485",
         4 => "ARMA (RS485/TTL)",
         5 => "IMU (TTL)",

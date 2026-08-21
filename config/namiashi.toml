@@ -131,7 +131,7 @@ max_rad = 2.62
 leg = "FR"
 
 [hardware.legs.bus.port]
-uart = 1
+uart = 2
 
 [[hardware.legs.bus.motors]]
 kind = "hip"
@@ -161,7 +161,7 @@ max_rad = 2.62
 leg = "RL"
 
 [hardware.legs.bus.port]
-uart = 2
+uart = 1
 
 [[hardware.legs.bus.motors]]
 kind = "hip"
