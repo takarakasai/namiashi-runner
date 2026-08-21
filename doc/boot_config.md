@@ -40,6 +40,11 @@ Debian GNU/Linux 11 (bullseye) / Linux 5.15.147-21-a733 / aarch64 / 8 core / RAM
 > 変動する。案E・案F の効果（合計で約 -150 ms）はこのばらつきと同程度であり、
 > **1 回の計測では因果を断定できない**。案A〜Dのような桁違いの改善とは性質が異なる。
 
+> **この表は `systemd-analyze` の値なので、U-Boot の時間は入っていない。**
+> 電源投入からの実時間は、これに **U-Boot メニューの待ち 1.0 秒**（`timeout 10`、
+> デシ秒単位）と U-Boot 自体の初期化時間（未測定）が乗る。
+> 「残る改善余地」の U-Boot の節を参照。
+
 - **案A** = `hdmi-toggle-once.service` の `ExecStartPre=/bin/sleep 15` 削除 → ユーザースペースを削減
 - **案B** = initramfs の `MODULES=most` → `dep` → カーネル時間を削減
 
@@ -682,6 +687,13 @@ multi-user.target @2.023s
 > **カーネル時間が -250 ms、合計 3.789 → 3.489 s になった**。
 > 「カーネル 1.744 s に単一の削減対象は無い」は、initrd の中身に plymouth の
 > テーマ・フォント・DRM ドライバが残っていた点を見落としていた。案G を参照。
+>
+> さらに 2026-08-21 の調査で、**U-Boot メニューが 1.0 秒待っている**ことが
+> 分かった（「残る改善余地」の U-Boot の節）。
+>
+> **打ち止め判断の穴は 2 件とも「`systemd-analyze` が測っていない領域」だった。**
+> この指標だけを見ていると、initrd の中身と U-Boot の時間は最後まで見えない。
+> 次に起動時間を詰めるときは、まず**測定範囲の外**を疑うこと。
 
 ## 最適化後の内訳（案A+B 適用後）
 
@@ -740,6 +752,85 @@ graphical.target @2.424s
 
 案C（不要サービスの整理）はいずれも並列実行のため、止めても総時間はほぼ変わらない。
 CPU 競合が減る程度。
+
+### U-Boot メニューの待ち時間は 1.0 秒【調査済み・保留】
+
+**この 1 秒は `systemd-analyze` の数字に含まれていない。** カーネル以降しか
+測っていないため。
+
+```
+/boot/extlinux/extlinux.conf:
+  prompt 1
+  timeout 10        ← 1/10 秒単位。= 1.0 秒
+```
+
+`timeout` の単位は**デシ秒**。`man u-boot-update` に明記されている:
+
+> `U_BOOT_TIMEOUT="50"` — Values are in **decisecond** greater than 0
+> (e.g. '10' for a 1 second timeout), **0 specifies to wait forever**. The default is 50.
+
+**`timeout 0` は「即起動」ではなく「無限に待つ」。** ヘッドレスのロボットで
+踏むと起動しなくなる。直感と逆なので注意。
+
+#### 設定の出所
+
+`/etc/default/u-boot` は全行コメントアウトのままで、実際に効いているのは
+**Radxa がパッケージで置いているフラグメント**:
+
+```sh
+# /usr/share/u-boot-menu/conf.d/radxa.conf
+U_BOOT_PROMPT=1
+U_BOOT_TIMEOUT=10
+```
+
+u-boot-menu の既定は 50（5 秒）なので、Radxa が既に 1/5 に縮めてある。
+
+`u-boot-update` は設定をこの順に読む（`/usr/sbin/u-boot-update:45-58`）:
+
+```
+/etc/default/u-boot
+  → /usr/share/u-boot-menu/conf.d/*.conf     ← radxa.conf はここ
+    → /etc/u-boot-menu/conf.d/*.conf         ← 後勝ち。上書きするならここ
+```
+
+**`/usr/share/` 側を直接編集してはいけない。** パッケージ所有なので更新で
+戻る。恒久的に変えるなら `/etc/u-boot-menu/conf.d/*.conf` に置く
+（現時点でこのディレクトリは存在しない）。
+
+#### 保留の理由
+
+`timeout 1` にすれば 0.1 秒で、**-0.9 秒**。残っているユーザースペースの
+削り代（journal-flush / timesyncd の数百 ms、しかもブレ幅同程度）より
+はるかに大きい単一項目である。
+
+にもかかわらず保留にしたのは、この 1 秒が「緊急時の起動手段」の要だから。
+rescue エントリ `l0r` を選ぶ唯一の手段で、initrd や overlay で起動しなく
+なったときの復帰経路になっている。0.1 秒では事実上押せない。
+
+電源投入時からキーを押しっぱなしにすれば拾える可能性はあるが、**U-Boot が
+メニュー開始前に入力バッファを捨てるかは本ボードで未確認。** 縮めるなら
+先に「実際に rescue に入れること」を試すこと。
+
+判断の順番としては、機体の組み立てと立ち上げが終わって構成が固まってから、
+0.3 秒（`timeout 3`）あたりで rescue に入れるかを実測して決める。
+これから initrd や overlay をいじる可能性がある段階で復帰経路を細くするのは
+割に合わない。
+
+#### 未測定: U-Boot 自体の初期化時間
+
+メニューの待ちは U-Boot 時間の一部でしかない。SPL / DRAM 初期化 / UFS 列挙 /
+initrd 読み出しは**どれも測っていない**（`systemd-analyze` には現れず、
+Linux 側からは観測できない）。
+
+```
+3.489 s   systemd-analyze（カーネル + ユーザースペース）
++ 1.0 s   U-Boot メニューの待ち
++ α       U-Boot 自体の初期化        ← 未測定
+```
+
+α がメニューの 1 秒より大きければ、削る優先順位が変わる。
+**次にシリアルコンソール（`115200n8`）を繋いで再起動するとき、U-Boot の
+出力タイムスタンプを採ること。**
 
 ---
 
@@ -816,8 +907,12 @@ sudo update-initramfs -u
 
 ### 緊急時の起動手段
 
-シリアルコンソール `115200n8`、U-Boot メニューは `prompt 1` / `timeout 10` で停止可能。
+シリアルコンソール `115200n8`、U-Boot メニューは `prompt 1` / `timeout 10`
+（**デシ秒単位なので 1.0 秒**）で停止可能。
 extlinux には通常エントリ `l0` と rescue エントリ `l0r`（`single`）がある。
+
+**この 1 秒を縮めるとここが細くなる。** 起動時間の観点では削りたい項目だが、
+復帰経路とのトレードオフになる。詳細は「残る改善余地」の U-Boot の節。
 
 1. バックアップから戻す:
    `cp -a /boot/initrd.img-5.15.147-21-a733.gzip.bak /boot/initrd.img-5.15.147-21-a733`
