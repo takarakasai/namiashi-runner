@@ -268,11 +268,22 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     std::thread::sleep(SETTLE);
 
-    println!("{name} を手でゆっくり端から端まで動かしてください（{secs:.0} 秒間 記録します）");
+    // --forever のときは秒数を決め打ちせず Ctrl-C で締める。手で端まで動かす
+    // 作業は時間が読めないので、20 秒に追われるより「納得したら止める」方が合う。
+    // 打ち切っても下の集計と --write はそのまま走る。
+    let forever = cli.flag("forever");
+    let stop = crate::runner::install_signal_handler();
+    if forever {
+        println!("{name} を手でゆっくり端から端まで動かしてください（Ctrl-C で確定）");
+    } else {
+        println!("{name} を手でゆっくり端から端まで動かしてください（{secs:.0} 秒間 記録します）");
+    }
     let start = Instant::now();
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
-    while start.elapsed().as_secs_f64() < secs {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed)
+        && (forever || start.elapsed().as_secs_f64() < secs)
+    {
         std::thread::sleep(Duration::from_millis(50));
         let s = bus.state()[k];
         if !s.ok {
@@ -280,10 +291,14 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         min = min.min(s.position_rad);
         max = max.max(s.position_rad);
-        print!(
-            "\r  min {min:+.4}  max {max:+.4}  （残り {:>4.1} s）",
-            secs - start.elapsed().as_secs_f64()
-        );
+        if forever {
+            print!("\r  min {min:+.4}  max {max:+.4}  （幅 {:+.4} rad）", max - min);
+        } else {
+            print!(
+                "\r  min {min:+.4}  max {max:+.4}  （残り {:>4.1} s）",
+                secs - start.elapsed().as_secs_f64()
+            );
+        }
         let _ = std::io::stdout().flush();
     }
     println!();

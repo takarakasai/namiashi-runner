@@ -303,13 +303,55 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
     )
 }
 
+/// 観測ループの終了条件。
+///
+/// `--forever` のときは経過時間を見ず、SIGINT / SIGTERM だけで抜ける。
+/// 立ち上げ中は「手で動かしながら眺める」ので、秒数を決め打ちできない。
+struct Deadline {
+    start: Instant,
+    seconds: Option<f64>,
+    stop: &'static std::sync::atomic::AtomicBool,
+}
+
+impl Deadline {
+    /// `seconds` が `None` なら Ctrl-C まで回る。
+    fn new(seconds: Option<f64>) -> Self {
+        Self {
+            start: Instant::now(),
+            seconds,
+            // ハンドラを仕掛ける以上、下の `running()` を必ず見ること
+            // （SIGINT の既定動作を奪うため）。
+            stop: crate::runner::install_signal_handler(),
+        }
+    }
+
+    fn running(&self) -> bool {
+        if self.stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        match self.seconds {
+            Some(s) => self.start.elapsed().as_secs_f64() < s,
+            None => true,
+        }
+    }
+
+    /// 画面に出す「いつまで回るか」の説明。
+    fn label(&self) -> String {
+        match self.seconds {
+            Some(s) => format!("{s:.0} 秒"),
+            None => "Ctrl-C まで".to_string(),
+        }
+    }
+}
+
 /// `sbus` — プロポの入力を表示し続ける。モータには触れない。
 ///
 /// 既定は再描画表示。`plain` で 1 行 / 更新の逐次出力に切り替わる
 /// （リダイレクトやログ採取のとき、ANSI が混ざると読めないため）。
-pub fn sbus(cfg: &AppConfig, seconds: f64, plain: bool) -> Result<(), String> {
+pub fn sbus(cfg: &AppConfig, seconds: Option<f64>, plain: bool) -> Result<(), String> {
     let rx = SbusReceiver::connect(&cfg.hardware.sbus).map_err(|e| e.to_string())?;
-    println!("{} で受信中（{seconds:.0} 秒）", rx.port());
+    let deadline = Deadline::new(seconds);
+    println!("{} で受信中（{}）", rx.port(), deadline.label());
     rx.wait_ready(Duration::from_secs(3))
         .map_err(|e| format!("{e}。送信機の電源を確認してください"))?;
 
@@ -321,12 +363,12 @@ pub fn sbus(cfg: &AppConfig, seconds: f64, plain: bool) -> Result<(), String> {
     let mut stdout = std::io::stdout();
     if !plain {
         // 再描画中にカーソルが踊るのを止める。最後に必ず戻す。
+        // Ctrl-C も Deadline 経由でループを抜けるので、復帰処理は飛ばされない。
         let _ = write!(stdout, "{CSI}?25l");
     }
     let mut previous = 0usize;
 
-    let start = Instant::now();
-    while start.elapsed().as_secs_f64() < seconds {
+    while deadline.running() {
         let state = rx.state();
         let cmd = teleop.update(&state, state.is_usable(timeout));
         if plain {
@@ -366,14 +408,14 @@ pub fn sbus(cfg: &AppConfig, seconds: f64, plain: bool) -> Result<(), String> {
 }
 
 /// `imu` — IMU の値を表示し続ける。
-pub fn imu(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
+pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
     let reader = ImuReader::connect(&cfg.hardware.imu).map_err(|e| e.to_string())?;
-    println!("{} で受信中（{seconds:.0} 秒）", reader.port());
+    let deadline = Deadline::new(seconds);
+    println!("{} で受信中（{}）", reader.port(), deadline.label());
     reader
         .wait_ready(Duration::from_secs(3))
         .map_err(|e| e.to_string())?;
-    let start = Instant::now();
-    while start.elapsed().as_secs_f64() < seconds {
+    while deadline.running() {
         let s = reader.sample_or_level();
         let st = reader.stats();
         println!(
@@ -399,14 +441,17 @@ pub fn imu(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
 ///
 /// ここで各バスの実効周期が出るので、`control.rate_hz` をいくつにできるかが
 /// 実測で決まる。
-pub fn legs(cfg: &AppConfig, seconds: f64) -> Result<(), String> {
+pub fn legs(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
-    println!("脚バスを開きました（指令は送りません。{seconds:.0} 秒観測）");
+    let deadline = Deadline::new(seconds);
+    println!(
+        "脚バスを開きました（指令は送りません。観測: {}）",
+        deadline.label()
+    );
     for bus in array.buses() {
         println!("  {} → {}", bus.leg().prefix(), bus.port());
     }
-    let start = Instant::now();
-    while start.elapsed().as_secs_f64() < seconds {
+    while deadline.running() {
         std::thread::sleep(Duration::from_millis(500));
         for bus in array.buses() {
             let st = bus.stats();

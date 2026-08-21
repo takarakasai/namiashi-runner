@@ -344,7 +344,11 @@ static STOP_FLAG: AtomicBool = AtomicBool::new(false);
 /// ハンドラの中では `AtomicBool` を立てるだけにして、脱力処理はメインスレッド
 /// で行う。ハンドラからシリアル I/O をするのは非同期シグナル安全でないし、
 /// 途中で握っているロックがあれば自己デッドロックになる。
-fn install_signal_handler() -> &'static AtomicBool {
+///
+/// **仕掛けたら、そのコマンドのループは必ず戻り値のフラグを見ること。**
+/// SIGINT の既定動作（プロセス終了）を奪うので、見ないループで呼ぶと
+/// Ctrl-C がまったく効かなくなる。`diag` の `--forever` もこれを使う。
+pub(crate) fn install_signal_handler() -> &'static AtomicBool {
     unsafe {
         let handler = handle_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);

@@ -60,9 +60,9 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         "check" => diag::check(&cfg),
         "dump" => dump::run(&cfg, cli),
         "calib" => calib::run(&cfg, cli),
-        "imu" => diag::imu(&cfg, cli.f64("secs").unwrap_or(10.0)),
-        "sbus" => diag::sbus(&cfg, cli.f64("secs").unwrap_or(10.0), cli.flag("plain")),
-        "legs" => diag::legs(&cfg, cli.f64("secs").unwrap_or(10.0)),
+        "imu" => diag::imu(&cfg, secs_or_forever(cli, 10.0)),
+        "sbus" => diag::sbus(&cfg, secs_or_forever(cli, 10.0), cli.flag("plain")),
+        "legs" => diag::legs(&cfg, secs_or_forever(cli, 10.0)),
         "run" => {
             let robot = robot::load_from_config(&cfg)?;
             let opts = runner::RunOptions {
@@ -76,6 +76,20 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         other => Err(format!(
             "未知のコマンド {other:?}。`namiashi --help` を見てください"
         )),
+    }
+}
+
+/// 観測コマンドの継続時間。`--forever` なら `None`（Ctrl-C まで）。
+///
+/// 立ち上げ中は「手で動かしながら眺める」ので秒数を決め打ちできない。
+/// `--secs 0` を無限の意味にするのは避けた。U_BOOT_TIMEOUT=0 が「即起動」
+/// ではなく「無限に待つ」で紛らわしいのと同じ罠になるため
+/// （`doc/boot_config.md` の U-Boot の節）。
+fn secs_or_forever(cli: &Cli, default: f64) -> Option<f64> {
+    if cli.flag("forever") {
+        None
+    } else {
+        Some(cli.f64("secs").unwrap_or(default))
     }
 }
 
@@ -136,6 +150,8 @@ fn print_help() {
                             プロポ入力と解釈結果を表示（同上）
                             既定は再描画表示。--plain で 1 行 / 更新の逐次出力
   legs   [--secs S]         脚バスの状態と実効周期を表示（**指令は送らない**）
+
+  imu / sbus / legs は --forever で Ctrl-C まで回り続ける（--secs より優先）。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
   run                       制御ループ（プロポ操縦）
 
@@ -154,7 +170,8 @@ calib のサブコマンド:
   move  --leg FL --joint thigh          1 軸だけ小さく動かして sign を決める
         [--deg D] [--speed R] [--assume y|n] [--write PATH]
   range --leg FL --joint thigh          脱力させ、手で動かして可動域を測る
-        [--secs S] [--margin RAD] [--write PATH]
+        [--secs S | --forever] [--margin RAD] [--write PATH]
+        --forever なら Ctrl-C で確定（打ち切っても集計と --write は走る）
   zero  [--pose NAME] [--write PATH]    全軸ゼロ出し + zero_pose_rad を記録
 
   1 度に 1 軸しか投入せず、既定の振り幅は 5°・速度 0.3 rad/s。
@@ -193,7 +210,8 @@ pub struct Cli {
 }
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
-const BOOL_FLAGS: &[&str] = &["help", "allow-no-sbus", "skip-zero", "viz", "realtime", "plain"];
+const BOOL_FLAGS: &[&str] =
+    &["help", "allow-no-sbus", "skip-zero", "viz", "realtime", "plain", "forever"];
 
 impl Cli {
     pub fn parse(args: impl Iterator<Item = String>) -> Self {
