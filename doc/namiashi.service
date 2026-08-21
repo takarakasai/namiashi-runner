@@ -58,4 +58,13 @@ Restart=no
 RestartSec=2
 
 [Install]
+# 注意: これは「電源投入 → S.BUS 応答」を 1.6 秒遅らせる設定である。
+#
+# CH348 の tty は 3.398 s、multi-user.target は 3.489 s なので、現状の差は
+# 91 ms しかない。しかし ch9344 を先読みして tty を 1.84 s に前倒しすると、
+# 律速がこの行に移る。namiashi はネットワークにもログインセッションにも
+# 依存しないので、multi-user.target を待つ理由は本来無い。
+#
+# 詳細と測定値: doc/boot_config.md「CH348 の tty 生成が 1.764 秒待たされている」
+# サービス投入時に ch9344 の先読みとセットで見直すこと。
 WantedBy=multi-user.target
