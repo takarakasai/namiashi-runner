@@ -268,10 +268,11 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     std::thread::sleep(SETTLE);
 
-    // --forever のときは秒数を決め打ちせず Ctrl-C で締める。手で端まで動かす
-    // 作業は時間が読めないので、20 秒に追われるより「納得したら止める」方が合う。
+    // 秒数を決め打ちせず Ctrl-C で締める指定。手で端まで動かす作業は時間が
+    // 読めないので、20 秒に追われるより「納得したら止める」方が合う。
     // 打ち切っても下の集計と --write はそのまま走る。
-    let forever = cli.flag("forever");
+    // `--secs 0`（以下）と `--forever` のどちらでも同じ（`main::secs_or_forever`）。
+    let forever = crate::secs_or_forever(cli, secs).is_none();
     let stop = crate::runner::install_signal_handler();
     if forever {
         println!("{name} を手でゆっくり端から端まで動かしてください（Ctrl-C で確定）");

@@ -79,18 +79,22 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
     }
 }
 
-/// 観測コマンドの継続時間。`--forever` なら `None`（Ctrl-C まで）。
+/// 観測コマンドの継続時間。無限なら `None`（Ctrl-C まで）。
 ///
 /// 立ち上げ中は「手で動かしながら眺める」ので秒数を決め打ちできない。
-/// `--secs 0` を無限の意味にするのは避けた。U_BOOT_TIMEOUT=0 が「即起動」
-/// ではなく「無限に待つ」で紛らわしいのと同じ罠になるため
-/// （`doc/boot_config.md` の U-Boot の節）。
-fn secs_or_forever(cli: &Cli, default: f64) -> Option<f64> {
+/// **`--secs 0`（以下）と `--forever` の両方**で無限になる。手が覚えている方を
+/// 打てばよく、どちらでも同じ。
+///
+/// 0 を「無限」に割り当てるのは、U_BOOT_TIMEOUT=0 が「即起動」ではなく
+/// 「無限に待つ」で紛らわしいのと同じ形ではある（`doc/boot_config.md` の
+/// U-Boot の節）。ただしこちらは**起動直後に「Ctrl-C まで」と画面に出る**ので、
+/// 意図と違えばその場で分かる。U-Boot 側は無言でハングするのが問題だった。
+pub fn secs_or_forever(cli: &Cli, default: f64) -> Option<f64> {
     if cli.flag("forever") {
-        None
-    } else {
-        Some(cli.f64("secs").unwrap_or(default))
+        return None;
     }
+    let secs = cli.f64("secs").unwrap_or(default);
+    (secs > 0.0).then_some(secs)
 }
 
 /// `--viz` 系のオプションを読む。
@@ -151,7 +155,7 @@ fn print_help() {
                             既定は再描画表示。--plain で 1 行 / 更新の逐次出力
   legs   [--secs S]         脚バスの状態と実効周期を表示（**指令は送らない**）
 
-  imu / sbus / legs は --forever で Ctrl-C まで回り続ける（--secs より優先）。
+  imu / sbus / legs は --secs 0（以下）または --forever で Ctrl-C まで回り続ける。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
   run                       制御ループ（プロポ操縦）
 
@@ -171,7 +175,8 @@ calib のサブコマンド:
         [--deg D] [--speed R] [--assume y|n] [--write PATH]
   range --leg FL --joint thigh          脱力させ、手で動かして可動域を測る
         [--secs S | --forever] [--margin RAD] [--write PATH]
-        --forever なら Ctrl-C で確定（打ち切っても集計と --write は走る）
+        --secs 0（以下）/ --forever なら Ctrl-C で確定
+        （打ち切っても集計と --write は走る）
   zero  [--pose NAME] [--write PATH]    全軸ゼロ出し + zero_pose_rad を記録
 
   1 度に 1 軸しか投入せず、既定の振り幅は 5°・速度 0.3 rad/s。
