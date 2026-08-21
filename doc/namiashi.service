@@ -1,0 +1,61 @@
+# namiashi 制御ループの systemd ユニット
+#
+# インストール:
+#   sudo cp ~/work/namiashi-runner/doc/namiashi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl start namiashi        # 手動起動で試す
+#
+# 電源投入で自動起動させるのは、手動起動で挙動を確認してから:
+#   sudo systemctl enable namiashi
+#
+# 設計の根拠は doc/runtime_tuning.md 「RT 優先度の付与」を参照。
+
+[Unit]
+Description=namiashi quadruped control loop
+Documentation=file:///home/takara/work/namiashi-runner/doc/runtime_tuning.md
+
+# CH348 の tty が生えてから起動する。ch9344 は USB 接続時に udev がロードする。
+# BindsTo により、USB を抜くとサービスも停止する。
+After=dev-ttyCH9344USB0.device
+BindsTo=dev-ttyCH9344USB0.device
+
+# ネットワークには依存しない。本番の操縦は S.BUS(UART6) 経由のプロポ。
+After=basic.target
+
+# 再起動の暴走を防ぐ（Restart= を有効にした場合に効く）
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=takara
+SupplementaryGroups=dialout
+WorkingDirectory=/home/takara/work/namiashi-runner
+ExecStart=/home/takara/work/namiashi-runner/target/release/namiashi run --config config/namiashi.toml
+
+# --- リアルタイム優先度 ---
+# systemd が付与するので、アプリ側に CAP_SYS_NICE も rtprio 制限も不要。
+# プロセスの全スレッド（制御ループ / leg-FL..RR / imu / sbus）が SCHED_FIFO になる。
+#
+# 50 は handover.md §5.5 の `chrt -f 50` に合わせた値。
+# これ以上上げるのは推奨しない（ksoftirqd 餓死のリスク）。
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+
+# --- 自動再起動: 安全に関わる判断が必要 ---
+#
+# Restart=on-failure にすると、制御プロセスが落ちても自動復帰する。
+# 一方で「異常終了 → 再起動 → 脚が再び動き出す」という挙動になる。
+# namiashi は受信断・フェイルセーフで速度 0・その場起立に入る設計だが、
+# 落ちた原因によっては安全側に倒れるとは限らない。
+#
+# 既定は Restart=no（手動復帰）。現場運用で自動復帰が必要と判断したら
+# on-failure に変更すること。
+Restart=no
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
