@@ -890,15 +890,26 @@ impl BusWorker {
                     self.motors[k].restart(&mut self.driver)
                 }
                 BusRequest::ClearError => {
-                    self.motors[k].clear_error(&mut self.driver).map(|st| {
-                        // 返るのは「消した後の状態」。消えたかはここで分かる。
-                        lock(&self.slot.status)[k] = JointStatus {
-                            voltage_v: st.voltage_v() as f64,
-                            temperature_c: st.temperature_c as f64,
-                            error_raw: st.error_state,
-                            valid: true,
-                        };
-                    })
+                    // **`0x9B` の応答を状態として使ってはいけない。**
+                    //
+                    // マニュアル §2 は「応答は status1 と同じ」としか言わず、
+                    // それが消す前か後かを書いていない。実機で測ると**消す前**
+                    // だった: 応答は異常が立ったまま返るのに、直後に読み直すと
+                    // 消えている（2026-08-22）。
+                    //
+                    // これを「クリア失敗」と読んで「時間が経つと自然に消える」
+                    // という誤った結論を出した。**送ったら読み直す。**
+                    self.motors[k]
+                        .clear_error(&mut self.driver)
+                        .and_then(|_| self.motors[k].read_status(&mut self.driver))
+                        .map(|st| {
+                            lock(&self.slot.status)[k] = JointStatus {
+                                voltage_v: st.voltage_v as f64,
+                                temperature_c: st.temperature_c as f64,
+                                error_raw: st.error.raw(),
+                                valid: true,
+                            };
+                        })
                 }
                 // 失敗した軸に古い値を残さないよう、読む前に落とす。
                 BusRequest::ReadSingleTurn => {

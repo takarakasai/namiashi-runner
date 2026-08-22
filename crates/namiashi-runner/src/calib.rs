@@ -798,6 +798,8 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             .request(BusRequest::ClearError)
             .map_err(|e| e.to_string())?;
     }
+    // **`0x9B` の応答は「消す前の状態」を返す。** バスワーカーが送信後に
+    // 0x9A で読み直しているので、その 1 往復ぶんを待つ。
     std::thread::sleep(SETTLE);
 
     println!();
@@ -807,10 +809,13 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     if after == 0 {
         println!("**消えました。**");
     } else {
-        println!("**{after} 軸で消えませんでした。原因がまだ残っています。**");
+        println!("**{after} 軸で消えませんでした。**");
         println!("マニュアル §2: 状態が正常に戻るまでフラグは消せません。");
         println!("  低電圧保護 … 電源電圧を確認（電流制限に当たっていませんか）");
         println!("  過熱       … 冷えるまで待つ");
+        println!();
+        println!("**--dry-run でもう一度見てください。** 少し遅れて消えることが");
+        println!("あります（`0x9B` の応答は消す前の状態を返すため）。");
     }
     Ok(())
 }

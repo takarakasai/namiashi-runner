@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use namiashi_hal::arm::ArmServo;
 use namiashi_hal::ch348::PortMap;
 use namiashi_hal::imu::ImuReader;
-use namiashi_hal::joint::{JointCommand, JointMode};
+use namiashi_hal::joint::{JointCommand, JointMode, LegSlot};
 use namiashi_hal::legs::{BusRequest, LegArray};
 use namiashi_hal::sbus::SbusReceiver;
 
@@ -67,6 +67,108 @@ impl Hardware {
         }
         q.arm = arm;
         q
+    }
+}
+
+/// 追従誤差と可動域逸脱の監視。**検出して言うだけで、何もしない。**
+///
+/// # 何のために要るのか
+///
+/// 2026-08-22 の過負荷では、脱調したモータが大電流を引いて電源が電流制限に
+/// 落ち、12 軸中 9 軸が低電圧保護に入った。**低電圧保護は時間で自然に解除
+/// されるが、待って直るのはフラグだけで、ロボットは既に倒れている。**
+/// 落とさないことが目的で、その前兆が**指令と実測が開いていくこと**。
+///
+/// # なぜ「言うだけ」なのか
+///
+/// **指令を実測から離れすぎないよう頭打ちにするのが本命の対策**だが、
+/// 歩行中の正常な追従誤差を知らないまま閾値を決めると普通の動作まで
+/// クランプされる。まずここで実測する。
+///
+/// 逸脱側も同じで、逸脱したまま脱力させるのは危ない（hip はメカ端まで
+/// 余裕がある一方でケーブルが先に限界を迎える。脱力すると外力に任せる
+/// ことになり自力で戻れない）。かといって自動で戻す動作を挟むと暴走時に
+/// 危険が増す。**決めきれていないので、まず測る。**
+struct Watch {
+    /// この集計区間での最悪の追従誤差 (rad) と、その軸。
+    worst: f64,
+    worst_at: Option<(LegSlot, usize)>,
+    /// 逸脱している軸を一度だけ言うためのフラグ。毎秒 12 行は読まれない。
+    warned_excursion: bool,
+    /// 12 軸の可動域。毎周期 config を引き直さないため。
+    limits: [[(f64, f64); 3]; 4],
+}
+
+impl Watch {
+    fn new(cfg: &AppConfig) -> Self {
+        let mut limits = [[(f64::NEG_INFINITY, f64::INFINITY); 3]; 4];
+        for (slot, dst) in LegSlot::ALL.iter().zip(limits.iter_mut()) {
+            let Some(bus) = cfg.hardware.bus_for(*slot) else {
+                continue;
+            };
+            for (m, d) in bus.motors.iter().zip(dst.iter_mut()) {
+                *d = (m.min_rad, m.max_rad);
+            }
+        }
+        Self {
+            worst: 0.0,
+            worst_at: None,
+            warned_excursion: false,
+            limits,
+        }
+    }
+
+    /// 1 周期ぶん。**目標を送っている間だけ意味がある**ので脱力中は呼ばない。
+    fn tick(&mut self, targets: &JointVec, measured: &JointVec) {
+        let mut out = Vec::new();
+        for (leg_i, slot) in LegSlot::ALL.iter().enumerate() {
+            for k in 0..3 {
+                let m = measured.legs[leg_i][k];
+                let e = (targets.legs[leg_i][k] - m).abs();
+                if e > self.worst {
+                    self.worst = e;
+                    self.worst_at = Some((*slot, k));
+                }
+                let (lo, hi) = self.limits[leg_i][k];
+                if m < lo || m > hi {
+                    out.push(format!(
+                        "{} {} {:+.1}°（範囲 [{:+.0}, {:+.0}]）",
+                        slot.prefix(),
+                        namiashi_hal::joint::LEG_JOINT_KINDS[k],
+                        m.to_degrees(),
+                        lo.to_degrees(),
+                        hi.to_degrees()
+                    ));
+                }
+            }
+        }
+        if out.is_empty() {
+            self.warned_excursion = false;
+        } else if !self.warned_excursion {
+            self.warned_excursion = true;
+            // **脱力させない。** 逸脱したまま力を抜くと外力に任せることに
+            // なり、自力で戻れない。operator が判断できるよう言うだけ。
+            log::error!(
+                "  可動域を出ています（指令は出し続けます）: {}",
+                out.join(" / ")
+            );
+        }
+    }
+
+    /// 集計区間の表示用文字列。読んだら最悪値は消す。
+    fn take(&mut self) -> String {
+        let out = match self.worst_at {
+            Some((leg, k)) => format!(
+                "{:.3}rad({} {})",
+                self.worst,
+                leg.prefix(),
+                namiashi_hal::joint::LEG_JOINT_KINDS[k]
+            ),
+            None => "-".to_string(),
+        };
+        self.worst = 0.0;
+        self.worst_at = None;
+        out
     }
 }
 
@@ -198,6 +300,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut motors_enabled = false;
     let mut measured_seen = false;
     let mut fault_hint_shown = false;
+    let mut watch = Watch::new(&cfg);
     let mut next = Instant::now();
     let mut last_status = Instant::now();
     let mut worst_overrun = Duration::ZERO;
@@ -250,6 +353,10 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             motors_enabled = want_enabled;
         }
 
+        // 脱力中は目標を送っていないので、追従誤差を見ても意味がない。
+        if out.leg_mode != JointMode::Idle {
+            watch.tick(&out.targets, &measured);
+        }
         write_targets(&hw, &out.targets, out.leg_mode, &cfg);
         if arm_app_driven {
             if let Err(e) = hw.arm.set_position(out.targets.arm) {
@@ -299,6 +406,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
                 ticks,
                 worst_overrun,
                 &mut fault_hint_shown,
+                &mut watch,
             );
             last_status = Instant::now();
             worst_overrun = Duration::ZERO;
@@ -361,6 +469,7 @@ fn log_status(
     ticks: u64,
     worst_overrun: Duration,
     fault_hint_shown: &mut bool,
+    watch: &mut Watch,
 ) {
     let rates: Vec<String> = hw
         .legs
@@ -383,7 +492,7 @@ fn log_status(
     let sbus = hw.sbus.state();
     log::info!(
         "[{}] {} v=({:+.3},{:+.3},{:+.3}) 脚[{}] err={} 最高温{} IMU {:.0}Hz \
-         S.BUS {}f/{}desync tick={} 遅延最大={:.1}ms",
+         S.BUS {}f/{}desync tick={} 遅延最大={:.1}ms 追従最大={}",
         controller.state().label(),
         controller.gait_select().label(),
         cmd.vx_m_s,
@@ -401,6 +510,7 @@ fn log_status(
         sbus.counters.desync_bytes,
         ticks,
         worst_overrun.as_secs_f64() * 1e3,
+        watch.take(),
     );
     // 異常ビットは埋もれさせない。自動で脱力はしない（立っている四足を
     // 脱力させると倒れる）ので、operator がモードスイッチで判断できるよう
