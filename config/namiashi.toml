@@ -108,8 +108,8 @@ kind = "hip"
 id = 1
 sign = 1.0
 zero_pose_rad = 0.42341194567807205
-min_rad = -0.785
-max_rad = 1.05
+min_rad = -1.0471975511965976
+max_rad = 0.7853981633974483
 
 [[hardware.legs.bus.motors]]
 kind = "thigh"
@@ -139,8 +139,8 @@ kind = "hip"
 id = 1
 sign = 1.0
 zero_pose_rad = -0.42341194567807205
-min_rad = -1.05
-max_rad = 0.785
+min_rad = -0.7853981633974483
+max_rad = 1.0471975511965976
 
 [[hardware.legs.bus.motors]]
 kind = "thigh"
@@ -170,8 +170,8 @@ kind = "hip"
 id = 1
 sign = -1.0
 zero_pose_rad = 0.3234119456780721
-min_rad = -0.785
-max_rad = 1.05
+min_rad = -1.0471975511965976
+max_rad = 0.7853981633974483
 
 [[hardware.legs.bus.motors]]
 kind = "thigh"
@@ -201,8 +201,8 @@ kind = "hip"
 id = 1
 sign = -1.0
 zero_pose_rad = -0.3234119456780721
-min_rad = -1.05
-max_rad = 0.785
+min_rad = -0.7853981633974483
+max_rad = 1.0471975511965976
 
 [[hardware.legs.bus.motors]]
 kind = "thigh"

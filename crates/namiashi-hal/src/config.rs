@@ -188,6 +188,16 @@ fn default_gear_ratio() -> f64 {
 /// **歯数のまま持つ。** 1.55 と丸めると 0.36% ずれ、calf の端で約 0.5° になる。
 pub const CALF_PULLEY_TEETH: (f64, f64) = (28.0, 18.0);
 
+/// hip の可動域の広いほう (rad) = 60°。左足は −側、右足は + 側。
+///
+/// **メカ端ではなく CAD から決めた運用上の制限。** hip のメカ端は非常に広く、
+/// そこまで振るとケーブルが破断しうる。機械が止めてくれない以上、ここで
+/// 止めるしかない。
+pub const HIP_WIDE_RAD: f64 = 1.0471975511965976;
+
+/// hip の可動域の狭いほう (rad) = 45°。
+pub const HIP_NARROW_RAD: f64 = 0.7853981633974483;
+
 /// calf の可動域 (rad)。±154.52338°、2026-08-21 の設計変更後の値。
 ///
 /// thigh の ±2.62 rad (±150.11°) とは違うので、まとめて扱わないこと。
@@ -426,9 +436,16 @@ impl Default for HardwareConfig {
             }
         };
         let leg_limits = |leg: LegSlot| -> [(f64, f64); 3] {
+            // hip は **CAD から読んだ値**で、URDF の <limit> ではない。
+            //
+            // メカ端は非常に広く、そこまで振るとケーブルが破断しうる。機械が
+            // 止めてくれないので、ソフト側で先に止める必要がある。
+            //
+            // **URDF は左右が逆だった**（大きさ 45/60 は合っていたが割り当てが
+            // 入れ替わっていた）。左足が -60..+45、右足が -45..+60。
             let hip = match leg {
-                LegSlot::Fl | LegSlot::Rl => (-0.785, 1.05),
-                LegSlot::Fr | LegSlot::Rr => (-1.05, 0.785),
+                LegSlot::Fl | LegSlot::Rl => (-HIP_WIDE_RAD, HIP_NARROW_RAD),
+                LegSlot::Fr | LegSlot::Rr => (-HIP_NARROW_RAD, HIP_WIDE_RAD),
             };
             // calf だけ可動域が違う。2026-08-21 の設計変更で ±154.52338°。
             [hip, (-2.62, 2.62), (-CALF_LIMIT_RAD, CALF_LIMIT_RAD)]
