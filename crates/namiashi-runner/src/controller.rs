@@ -798,6 +798,33 @@ mod tests {
         );
     }
 
+    /// 歩行中に受信が切れても**その場で立ったまま**。初期姿勢へは戻らない。
+    ///
+    /// CH5 中段が「初期姿勢で保持」になったので、フェイルセーフを `Stand`
+    /// へ丸めると**歩行中の受信断でしゃがみ込む**。求めているのは
+    /// 「速度 0・その場起立」。
+    #[test]
+    fn a_lost_link_while_walking_holds_the_stance() {
+        let dt = 0.005;
+        let mut c = controller();
+        let mut go = cmd(ModeRequest::Walk);
+        go.vx_m_s = 0.10;
+        run_until(&mut c, &go, State::Active, 20.0);
+        for _ in 0..400 {
+            c.tick(&go, &JointVec::zeros(), &imu(), dt);
+        }
+        // 受信断の指令（モードは歩行のまま、速度ゼロ、link_ok = false）。
+        let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Walk);
+        for _ in 0..600 {
+            let out = c.tick(&lost, &JointVec::zeros(), &imu(), dt);
+            assert_eq!(
+                out.state,
+                State::Active,
+                "受信断で歩容から抜けた（初期姿勢へしゃがみ込んでいる）"
+            );
+        }
+    }
+
     /// `--allow-no-sbus`（受信機なしのベンチ）は**初期姿勢で止まる**。
     ///
     /// CH5 中段の意味を変えた副作用。以前は立ち姿勢を経て歩容まで行って

@@ -279,10 +279,20 @@ impl ModeRequest {
     /// | 直前 | 受信断後 | 理由 |
     /// |---|---|---|
     /// | `Relax` | `Relax` | **脱力中に受信が切れて立ち上がるのは危ない** |
-    /// | `Stand` | `Stand` | そのまま保持 |
-    /// | `Walk` | `Stand` | 速度は 0 にするが**脱力はしない**。荷重がかかった状態で崩れる |
+    /// | `Stand` | `Stand` | 初期姿勢のまま保持 |
+    /// | `Walk` | `Walk` | **速度だけ 0 にして、その場で立ったまま**保持 |
+    ///
+    /// つまり**モードは変えない**。速度をゼロにするのは
+    /// [`OperatorCommand::failsafe`] の側。
+    ///
+    /// `Walk` を `Stand` へ丸めてはいけない。CH5 中段は「初期姿勢で保持」
+    /// なので、丸めると**歩行中に受信が切れた瞬間に初期姿勢へしゃがみ込む**。
+    /// 求めているのは「速度 0・その場起立」。丸めていた時期があるが、
+    /// それは `Stand` が歩容の立ち姿勢を意味していた頃の名残。
+    ///
+    /// **脱力へ落とすのも禁止。** 荷重がかかった四足を脱力させると崩れる。
     pub fn capped_for_failsafe(self) -> Self {
-        self.min(ModeRequest::Stand)
+        self
     }
 }
 
@@ -584,9 +594,9 @@ mod tests {
     fn a_lost_link_never_escalates_the_mode() {
         assert_eq!(ModeRequest::Relax.capped_for_failsafe(), ModeRequest::Relax);
         assert_eq!(ModeRequest::Stand.capped_for_failsafe(), ModeRequest::Stand);
-        // 歩行中に切れたら止まって保持。**脱力させてはいけない**
-        // （荷重がかかった状態で崩れる）。
-        assert_eq!(ModeRequest::Walk.capped_for_failsafe(), ModeRequest::Stand);
+        // 歩行中に切れたら**その場で立ったまま**保持。速度だけ 0 になる。
+        // `Stand` へ丸めると初期姿勢へしゃがみ込んでしまう。
+        assert_eq!(ModeRequest::Walk.capped_for_failsafe(), ModeRequest::Walk);
     }
 
     #[test]
@@ -611,7 +621,8 @@ mod tests {
         assert_eq!(cmd.mode, ModeRequest::Walk);
         assert!(cmd.vx_m_s > 0.0);
         let lost = t.update(&state_with(&[(5, RAW_MAX), (2, RAW_MAX)]), false);
-        assert_eq!(lost.mode, ModeRequest::Stand);
+        // モードは歩行のまま = 立ち姿勢を保つ。速度だけ 0。
+        assert_eq!(lost.mode, ModeRequest::Walk);
         assert_eq!(lost.vx_m_s, 0.0);
     }
 
