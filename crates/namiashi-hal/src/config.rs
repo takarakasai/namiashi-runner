@@ -84,10 +84,10 @@ pub struct MotorConfig {
     pub max_rad: f64,
     /// この軸だけの減速比。`None` なら [`LegsConfig::gear_ratio`] を使う。
     ///
-    /// **calf だけベルト駆動で、プーリ径比 1.47 が MG4005 内蔵の 10:1 に
-    /// 上乗せされる**（総減速比 14.7）。脚のなかで一番負荷がかかる軸なので、
+    /// **calf だけベルト駆動で、プーリの歯数比 28:18 が MG4005 内蔵の 10:1 に
+    /// 上乗せされる**（総減速比 15.5556）。脚のなかで一番負荷がかかる軸なので、
     /// 設計上そうなっている。ここを `LegsConfig::gear_ratio` の 10.0 のまま
-    /// にすると calf の角度が 47% ずれる。
+    /// にすると calf の角度が 55.6% ずれる。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gear_ratio: Option<f64>,
 }
@@ -181,6 +181,13 @@ fn default_bus_rate_hz() -> f64 {
 fn default_gear_ratio() -> f64 {
     10.0
 }
+
+/// calf のベルト駆動プーリの歯数 `(従動, 駆動)`。
+///
+/// 総減速比は [`default_gear_ratio`] にこの比を掛けたもの = 15.5556。
+/// **歯数のまま持つ。** 1.55 と丸めると 0.36% ずれ、calf の端で約 0.5° になる。
+pub const CALF_PULLEY_TEETH: (f64, f64) = (28.0, 18.0);
+
 fn default_max_speed() -> f64 {
     8.0
 }
@@ -437,9 +444,14 @@ impl Default for HardwareConfig {
             };
             [hip, pitch, pitch]
         };
-        // calf だけベルト駆動。プーリ径比 1.47 が内蔵の 10:1 に上乗せされる。
+        // calf だけベルト駆動。プーリの歯数比が内蔵の 10:1 に上乗せされる。
+        //
+        // **歯数から直接計算する。** 28/18 = 1.5555... で、1.55 と丸めると
+        // 0.36% ずれる（calf の端で約 0.5°）。歯数は整数で誤差が無いので、
+        // 丸めた小数ではなく比のまま持つ。
         let leg_gear = |k: usize| -> Option<f64> {
-            (LEG_JOINT_KINDS[k] == "calf").then_some(default_gear_ratio() * 1.47)
+            (LEG_JOINT_KINDS[k] == "calf")
+                .then_some(default_gear_ratio() * CALF_PULLEY_TEETH.0 / CALF_PULLEY_TEETH.1)
         };
         let bus: Vec<LegBusConfig> = LegSlot::ALL
             .iter()
@@ -542,7 +554,7 @@ mod tests {
         }
     }
 
-    /// calf だけベルト駆動でプーリ径比 1.47 が内蔵の 10:1 に上乗せされる。
+    /// calf だけベルト駆動でプーリの歯数比 28:18 が内蔵の 10:1 に上乗せされる。
     ///
     /// バス共通の `gear_ratio` のままだと calf が 47% ずれるので、
     /// 軸個別に持てていることと値の両方を固定する。
@@ -554,7 +566,7 @@ mod tests {
             let bus = cfg.bus_for(leg).unwrap();
             for m in &bus.motors {
                 let expected = if m.kind == "calf" {
-                    bus_default * 1.47
+                    bus_default * CALF_PULLEY_TEETH.0 / CALF_PULLEY_TEETH.1
                 } else {
                     bus_default
                 };

@@ -389,7 +389,7 @@ impl LegBus {
             },
         })?;
 
-        // **減速比は軸ごとに引く。** calf だけベルト駆動でプーリ径比 1.47 が
+        // **減速比は軸ごとに引く。** calf だけベルト駆動で歯数比 28:18 が
         // 内蔵減速機に上乗せされるため、バス共通の値では calf が 47% ずれる。
         let motor_cfg_for = |ratio: f64| match legs.torque_constant_nm_per_a {
             Some(kt) => LkMotorConfig::new(ratio as f32, kt as f32),

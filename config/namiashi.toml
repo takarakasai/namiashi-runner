@@ -126,7 +126,7 @@ sign = 1.0
 zero_pose_rad = -2.792526803190927
 min_rad = -2.62
 max_rad = 2.62
-gear_ratio = 14.7
+gear_ratio = 15.555555555555555
 
 [[hardware.legs.bus]]
 leg = "FR"
@@ -157,7 +157,7 @@ sign = -1.0
 zero_pose_rad = -2.792526803190927
 min_rad = -2.62
 max_rad = 2.62
-gear_ratio = 14.7
+gear_ratio = 15.555555555555555
 
 [[hardware.legs.bus]]
 leg = "RL"
@@ -188,7 +188,7 @@ sign = 1.0
 zero_pose_rad = -2.792526803190927
 min_rad = -2.62
 max_rad = 2.62
-gear_ratio = 14.7
+gear_ratio = 15.555555555555555
 
 [[hardware.legs.bus]]
 leg = "RR"
@@ -219,7 +219,7 @@ sign = -1.0
 zero_pose_rad = -2.792526803190927
 min_rad = -2.62
 max_rad = 2.62
-gear_ratio = 14.7
+gear_ratio = 15.555555555555555
 
 [hardware.imu]
 baud = 921600
