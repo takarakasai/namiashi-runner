@@ -85,6 +85,9 @@ pub struct Controller {
     /// チキンヘッドが効かないことを 1 度だけ警告するためのフラグ。
     /// 毎周期出すとログが埋まる。
     warned_chicken_head: bool,
+    /// 胴体高さ変更が効かないことを 1 度だけ警告するためのフラグ。
+    /// 歩容を切り替えたら出し直す。
+    warned_body_height: bool,
     /// 直近の歩容出力から取った胴体姿勢と接地。可視化にだけ使う。
     ///
     /// 歩容を回していない状態（遷移中・ポーズ再生中）でも姿勢を描きたいので、
@@ -117,6 +120,7 @@ impl Controller {
             cfg,
             just_changed: false,
             warned_chicken_head: false,
+            warned_body_height: false,
             body_view: BodyView::default(),
         }
     }
@@ -257,8 +261,25 @@ impl Controller {
             return;
         }
         // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす。
+        // **ただし受け付けるのは LinearCrawl だけ**（`gait_supports_body_height`）。
+        // 他の歩容では `set_body_height_m` が黙って捨てるので、動かしても
+        // 何も起きない。黙って無視すると「配線かプロポの故障」に見えるので、
+        // 実際にスティックが動いたときに 1 度だけ言う。
         self.gait
             .set_body_height_m(self.cfg.gait.stance_height_m + cmd.height_offset_m);
+        if cmd.height_offset_m != 0.0
+            && !self.warned_body_height
+            && !crate::robot::gait_supports_body_height(crate::robot::gait_mode_of(
+                self.gait_select,
+                self.cfg.gait.crawl_use_linear,
+            ))
+        {
+            log::warn!(
+                "歩容 {} は実行中の胴体高さ変更を受け付けません（CH3 は効きません）。                 受け付けるのは LinearCrawl のみで、そちらは横移動と旋回を受け付けません。                 高さを変えるなら設定の gait.stance_height_m を変えて起動し直してください",
+                self.gait_select.label()
+            );
+            self.warned_body_height = true;
+        }
         let v = match cmd.mode {
             ModeRequest::Walk => velocity_cmd(cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s),
             // 起立中は歩容を止める（速度ゼロ = 接地したまま）。
@@ -368,6 +389,8 @@ impl Controller {
         log::info!("歩容を {} に切り替えます", select.label());
         self.gait = self.robot.build_gait(&self.cfg.gait, select);
         self.gait_select = select;
+        // 歩容ごとに可否が違うので、切り替えたら言い直す。
+        self.warned_body_height = false;
     }
 }
 

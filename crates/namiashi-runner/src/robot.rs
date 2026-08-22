@@ -135,6 +135,20 @@ pub fn gait_mode_of(select: GaitSelect, crawl_use_linear: bool) -> GaitMode {
     }
 }
 
+/// その歩容が実行中の胴体高さ変更（プロポ CH3）を受け付けるか。
+///
+/// **`LinearCrawl` だけが受け付ける。** `AnyGaitController::set_body_height_m`
+/// は他のモードでは `_ => {}` で**黙って捨てる**ので、上位からは成功と
+/// 区別がつかない。既定は全歩容 `Champ` なので、既定設定では CH3 は
+/// どこにも効かない。
+///
+/// 設定の `gait.stance_height_m` は別経路（構築時の `GaitConfig`）なので
+/// こちらは全歩容で効く。**「設定で高さを変えたら姿勢が変わった」ことを
+/// 「実行中の高さ変更が効く」根拠にしてはいけない**（実際に取り違えた）。
+pub fn gait_supports_body_height(mode: GaitMode) -> bool {
+    matches!(mode, GaitMode::LinearCrawl)
+}
+
 fn cycle_period_of(tuning: &GaitTuning, select: GaitSelect) -> Option<f64> {
     match select {
         GaitSelect::Crawl => tuning.crawl_cycle_s,
@@ -200,6 +214,34 @@ mod tests {
         }
         assert_eq!(gait_mode_of(GaitSelect::Crawl, true), GaitMode::LinearCrawl);
         assert_eq!(gait_mode_of(GaitSelect::Walk, true), GaitMode::Champ);
+    }
+
+    /// 既定設定では CH3（胴体高さ）はどの歩容でも効かない。
+    ///
+    /// `AnyGaitController::set_body_height_m` が `LinearCrawl` 以外を
+    /// `_ => {}` で捨てるため。**黙って捨てられるので、警告を出す側の
+    /// 判定がここと食い違うと誰も気づけない。**
+    #[test]
+    fn only_linear_crawl_takes_a_body_height_change() {
+        assert!(gait_supports_body_height(GaitMode::LinearCrawl));
+        assert!(!gait_supports_body_height(GaitMode::Champ));
+        // 既定 (crawl_use_linear = false) では 3 歩容とも Champ なので、
+        // CH3 はどこにも効かない。
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            assert!(
+                !gait_supports_body_height(gait_mode_of(select, false)),
+                "{select:?} で高さ変更が効くことになっている"
+            );
+        }
+        // crawl_use_linear = true なら Crawl だけ効く。
+        assert!(gait_supports_body_height(gait_mode_of(
+            GaitSelect::Crawl,
+            true
+        )));
+        assert!(!gait_supports_body_height(gait_mode_of(
+            GaitSelect::Trot,
+            true
+        )));
     }
 
     /// 同梱モデルが既定設定の指す名前を全部持っていること。モデルを

@@ -29,7 +29,7 @@ channel = 1
 raw_min = 172
 raw_center = 992
 raw_max = 1811
-reverse = true
+reverse = false
 deadband = 0.06
 expo = 0.0
 
