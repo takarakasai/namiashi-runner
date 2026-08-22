@@ -103,6 +103,14 @@ fn one() -> f64 {
     1.0
 }
 
+/// PID の 3 つ組。各 0..=2000。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidGains {
+    pub kp: u16,
+    pub ki: u16,
+    pub kd: u16,
+}
+
 /// 1 本の RS485 脚バス。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LegBusConfig {
@@ -146,6 +154,32 @@ pub struct LegsConfig {
     /// 減速比（モータ軸回転数 / 出力軸回転数）。
     #[serde(default = "default_gear_ratio")]
     pub gear_ratio: f64,
+    /// 起動時に書き込む位置ループ PID。`None` なら**触らない**。
+    ///
+    /// **ドライバの RAM にしか書けない**（`0xC1`）ので、電源を入れ直すたびに
+    /// 消える。柔らかい設定で運用したいなら毎回書き直す必要があり、
+    /// それを手作業にすると必ず忘れる。ここに書いておけば起動時に入る。
+    ///
+    /// **12 軸すべてに書けるわけではない。** `0xC0`/`0xC1` に応答しない
+    /// 個体が混ざっており（実測で 12 軸中 5 軸）、そちらは既定値のまま
+    /// 残る。**硬い軸と柔らかい軸が混在する**ので、歩かせる前に
+    /// `calib pid` で実際に何が入ったか確認すること。
+    #[serde(default)]
+    pub position_pid: Option<PidGains>,
+    /// 起動時に書き込む電流ループ PID。`None` なら**触らない**。
+    ///
+    /// **コンプライアンスはここが効く**（実機で確認、2026-08-22）。
+    /// 位置ループの Kp/Ki を下げても手応えはあまり変わらなかったが、
+    /// 電流ループの Kd を上げると柔らかくなる。
+    ///
+    /// `position_pid` と同じく **RAM のみ**で、書けない個体がある。
+    #[serde(default)]
+    pub current_pid: Option<PidGains>,
+    /// 起動時に書き込むトルク電流リミット (`0x1E`, 0..=2000)。`None` で触らない。
+    ///
+    /// **下げすぎると自重を支えられない。** 同じく RAM のみ。
+    #[serde(default)]
+    pub torque_limit: Option<i16>,
     /// トルク定数 (N·m/A、モータ軸)。`None` なら電流 (A) をそのまま
     /// トルク API に流す `MotorConfig::current_units` 相当になる。
     #[serde(default)]
@@ -512,6 +546,9 @@ impl Default for HardwareConfig {
                 response_timeout_ms: default_response_timeout_ms(),
                 bus_rate_hz: default_bus_rate_hz(),
                 gear_ratio: default_gear_ratio(),
+                position_pid: None,
+                current_pid: None,
+                torque_limit: None,
                 torque_constant_nm_per_a: None,
                 default_max_speed_rad_s: default_max_speed(),
                 max_target_rate_rad_s: default_max_target_rate(),

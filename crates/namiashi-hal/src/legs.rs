@@ -118,23 +118,84 @@ pub struct JointPids {
     pub current_kp: u16,
     pub current_ki: u16,
     pub current_kd: u16,
+    /// トルク電流リミット（`0x1E`）。読めなければ `None`。
+    ///
+    /// **コンプライアンスはここが効く。** ゲインは「どれだけ強く直そうと
+    /// するか」を変えるが、これは「どれだけ強く押せるか」を頭打ちにする。
+    pub torque_limit: Option<i16>,
     /// どちらのインタフェースで読めたか。**個体で違う。**
     pub via: PidInterface,
 }
 
-/// 位置ループの Kp だけ書き換える（`0xC1`、RAM）。Ki/Kd は現状値を保つ。
+/// 1 ループぶんの書き換え指定。`None` の項は現状値を保つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PidPartial {
+    pub kp: Option<u16>,
+    pub ki: Option<u16>,
+    pub kd: Option<u16>,
+}
+
+impl PidPartial {
+    pub fn is_empty(&self) -> bool {
+        self.kp.is_none() && self.ki.is_none() && self.kd.is_none()
+    }
+}
+
+/// 位置ループと速度ループの書き換え指定。
 ///
-/// **読んでから書く。** Kp だけ変えたいのに 3 つ組で送る仕様なので、
-/// 現状の Ki/Kd を知らずに書くと**知らないうちに Ki を 0 にする**。
-fn write_position_kp(driver: &mut Rs485Driver, id: MotorId, kp: u16) -> lkmotor_driver::Result<()> {
+/// **コンプライアンスは位置ループの Ki が効く。** Kp だけ下げても、
+/// 積分項が残っていると定常偏差を押し切ってしまい柔らかくならない
+/// （実機で確認、2026-08-22）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PidSet {
+    pub position: PidPartial,
+    pub speed: PidPartial,
+    /// 電流ループ。**コンプライアンスはここの Kd が効く**（実機で確認、
+    /// 2026-08-22）。位置ループの Kp を下げても手応えはあまり変わらない。
+    pub current: PidPartial,
+    /// トルク電流リミット（`0x1E`、0..=2000）。
+    pub torque_limit: Option<i16>,
+}
+
+impl PidSet {
+    pub fn is_empty(&self) -> bool {
+        self.position.is_empty()
+            && self.speed.is_empty()
+            && self.current.is_empty()
+            && self.torque_limit.is_none()
+    }
+}
+
+/// 指定された項だけ書き換える（`0xC1`、RAM）。
+///
+/// **読んでから書く。** 3 つ組で送る仕様なので、現状値を知らずに書くと
+/// **指定していない項を知らないうちに 0 にする**。
+fn write_pids(driver: &mut Rs485Driver, id: MotorId, set: PidSet) -> lkmotor_driver::Result<()> {
     use lkmotor_driver::protocol::command::ControlParamId;
     use lkmotor_driver::protocol::response::{ControlParamValue, PidTriple};
     use lkmotor_driver::LkCommands;
-    let now = match driver.read_control_param(id, ControlParamId::PositionLoopPid)? {
-        ControlParamValue::Pid(t) => t,
-        _ => return Err(lkmotor_driver::Error::Timeout { motor_id: id.get() }),
-    };
-    driver.write_control_pid_ram(id, ControlParamId::PositionLoopPid, PidTriple { kp, ..now })?;
+    for (param, part) in [
+        (ControlParamId::PositionLoopPid, set.position),
+        (ControlParamId::SpeedLoopPid, set.speed),
+        (ControlParamId::CurrentLoopPid, set.current),
+    ] {
+        if part.is_empty() {
+            continue;
+        }
+        let now = match driver.read_control_param(id, param)? {
+            ControlParamValue::Pid(t) => t,
+            _ => return Err(lkmotor_driver::Error::Timeout { motor_id: id.get() }),
+        };
+        let want = PidTriple {
+            kp: part.kp.unwrap_or(now.kp),
+            ki: part.ki.unwrap_or(now.ki),
+            kd: part.kd.unwrap_or(now.kd),
+        };
+        driver.write_control_pid_ram(id, param, want)?;
+    }
+    if let Some(v) = set.torque_limit {
+        driver.write_control_i16_ram(id, ControlParamId::TorqueLimit, v)?;
+    }
     Ok(())
 }
 
@@ -179,6 +240,11 @@ fn read_documented_pids(driver: &mut Rs485Driver, id: MotorId) -> Option<JointPi
     let pos = read(driver, ControlParamId::PositionLoopPid)?;
     let spd = read(driver, ControlParamId::SpeedLoopPid)?;
     let cur = read(driver, ControlParamId::CurrentLoopPid)?;
+    // トルクリミットは読めなくても致命的ではない（表示が `-` になるだけ）。
+    let torque_limit = match driver.read_control_param(id, ControlParamId::TorqueLimit) {
+        Ok(ControlParamValue::TorqueLimit(v)) => Some(v),
+        _ => None,
+    };
     Some(JointPids {
         position_kp: pos.kp,
         position_ki: pos.ki,
@@ -189,6 +255,7 @@ fn read_documented_pids(driver: &mut Rs485Driver, id: MotorId) -> Option<JointPi
         current_kp: cur.kp,
         current_ki: cur.ki,
         current_kd: cur.kd,
+        torque_limit,
         via: PidInterface::Documented,
     })
 }
@@ -252,7 +319,7 @@ pub enum BusRequest {
     ///
     /// 結果は [`LegBus::pids`] で取る。
     ReadPid,
-    /// 位置ループの Kp を書く（`0xC1`、**RAM のみ**）。
+    /// PID を書く（`0xC1`、**RAM のみ**）。指定した項だけ変える。
     ///
     /// **電源を切れば元に戻る。** まずければ落とすだけで戻せる。
     /// ROM には書かない。
@@ -260,9 +327,9 @@ pub enum BusRequest {
     /// `0xC0` に応答する個体だけが対象。`0x30` 系にしか応答しない個体は
     /// 未対応（書き込み側 `0x31` が未文書のため）。結果は
     /// [`LegBus::pids`] を読み直して確かめる。
-    SetPositionKp(u16),
-    /// 1 軸だけ位置ループ Kp を書く。**まずこれで試すこと。**
-    SetPositionKpJoint(usize, u16),
+    SetPid(PidSet),
+    /// 1 軸だけ PID を書く。**まずこれで試すこと。**
+    SetPidJoint(usize, PidSet),
     /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
     ///
     /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
@@ -641,6 +708,26 @@ impl LegBus {
             issued: [None; 3],
             status_interval: Duration::from_millis(legs.status_interval_ms),
             response_timeout: timeout,
+            startup_pid: PidSet {
+                position: match legs.position_pid {
+                    Some(g) => PidPartial {
+                        kp: Some(g.kp),
+                        ki: Some(g.ki),
+                        kd: Some(g.kd),
+                    },
+                    None => PidPartial::default(),
+                },
+                speed: PidPartial::default(),
+                current: match legs.current_pid {
+                    Some(g) => PidPartial {
+                        kp: Some(g.kp),
+                        ki: Some(g.ki),
+                        kd: Some(g.kd),
+                    },
+                    None => PidPartial::default(),
+                },
+                torque_limit: legs.torque_limit,
+            },
             next_status: Instant::now(),
             status_cursor: 0,
             frame_offset: [0.0; 3],
@@ -682,6 +769,8 @@ struct BusWorker {
     /// 制御周期用の応答待ち（`response_timeout_ms`）。
     /// 一部の読み出しで一時的に広げたあと、これに戻す。
     response_timeout: Duration,
+    /// 起動時に書き込む PID / トルクリミット。空なら触らない。
+    startup_pid: PidSet,
     next_status: Instant,
     /// 次に State1 を読む軸。1 周回で 1 軸だけ読み、帯域を食わないようにする。
     status_cursor: usize,
@@ -701,6 +790,7 @@ struct BusWorker {
 
 impl BusWorker {
     fn run(mut self) {
+        self.apply_startup_pids();
         let mut next = Instant::now();
         let mut window_start = Instant::now();
         let mut window_ticks = 0u64;
@@ -966,6 +1056,41 @@ impl BusWorker {
         }
     }
 
+    /// 設定に書かれた PID / トルクリミットを起動時に 1 回書く。
+    ///
+    /// **RAM にしか書けない**（`0xC1`）ので、電源を入れ直すたびに消える。
+    /// 柔らかい設定で運用するなら毎回書き直すしかなく、手作業にすると
+    /// 必ず忘れる。
+    ///
+    /// **書けない個体がある。** `0xC0`/`0xC1` に応答しないファーム世代が
+    /// 混ざっており、そちらは既定値のまま残る。**硬い軸と柔らかい軸が
+    /// 混在する**ので、書けなかった軸を必ず名指しで出す。黙って一部だけ
+    /// 適用するのが一番危ない。
+    fn apply_startup_pids(&mut self) {
+        if self.startup_pid.is_empty() {
+            return;
+        }
+        self.driver.set_response_timeout(Duration::from_millis(200));
+        let mut failed = Vec::new();
+        for k in 0..3 {
+            let id = self.motors[k].id();
+            if write_pids(&mut self.driver, id, self.startup_pid).is_err() {
+                failed.push(crate::joint::LEG_JOINT_KINDS[k]);
+            }
+        }
+        self.driver.set_response_timeout(self.response_timeout);
+        if failed.is_empty() {
+            log::info!("{} の PID を設定値で上書きしました", self.leg.prefix());
+        } else {
+            log::warn!(
+                "{} の {} には PID を書けませんでした（`0xC1` に応答しない個体）。\
+                 **既定値のまま**なので、他の軸と硬さが違います",
+                self.leg.prefix(),
+                failed.join(", ")
+            );
+        }
+    }
+
     fn drain_requests(&mut self) -> std::result::Result<(), Disconnected> {
         loop {
             match self.requests.try_recv() {
@@ -984,7 +1109,7 @@ impl BusWorker {
             BusRequest::EnableJoint(k)
             | BusRequest::DisableJoint(k)
             | BusRequest::RestartJoint(k)
-            | BusRequest::SetPositionKpJoint(k, _)
+            | BusRequest::SetPidJoint(k, _)
             | BusRequest::ClearMultiTurnJoint(k) => {
                 if k >= 3 {
                     log::warn!("{} に軸 {k} はありません", self.leg.prefix());
@@ -1035,10 +1160,10 @@ impl BusWorker {
                             };
                         })
                 }
-                BusRequest::SetPositionKp(kp) | BusRequest::SetPositionKpJoint(_, kp) => {
+                BusRequest::SetPid(set) | BusRequest::SetPidJoint(_, set) => {
                     let id = self.motors[k].id();
                     self.driver.set_response_timeout(Duration::from_millis(200));
-                    let r = write_position_kp(&mut self.driver, id, kp);
+                    let r = write_pids(&mut self.driver, id, set);
                     // 書いた後の値を読み直す。応答を信じない。
                     lock(&self.slot.pids)[k] = read_documented_pids(&mut self.driver, id);
                     self.driver.set_response_timeout(self.response_timeout);
@@ -1076,6 +1201,7 @@ impl BusWorker {
                         current_kp: p.current_kp as u16,
                         current_ki: p.current_ki as u16,
                         current_kd: 0,
+                        torque_limit: None,
                         via: PidInterface::Legacy,
                     })
                     .or_else(|| read_documented_pids(&mut self.driver, id));

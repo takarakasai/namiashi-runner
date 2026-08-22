@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use namiashi_hal::config::HardwareConfig;
 use namiashi_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
-use namiashi_hal::legs::{BusRequest, LegArray, LegBus};
+use namiashi_hal::legs::{BusRequest, LegArray, LegBus, PidPartial, PidSet};
 
 use crate::config::AppConfig;
 use crate::Cli;
@@ -1020,41 +1020,72 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     if only_joint.is_some() && only.is_none() {
         return Err("--joint を使うときは --leg も指定してください".into());
     }
-    // **`--set-position-kp` を付けたときだけ書く。** 既定は読むだけ。
-    let set_kp = match cli.str("set-position-kp") {
-        None => None,
-        Some(v) => Some(
-            v.parse::<u16>()
-                .map_err(|_| format!("--set-position-kp {v:?} が数値ではありません"))
-                .and_then(|k| {
-                    if k <= 2000 {
-                        Ok(k)
-                    } else {
-                        Err(format!("--set-position-kp {k} が範囲外です（0〜2000）"))
-                    }
-                })?,
-        ),
+    // **`--set-*` を付けたときだけ書く。** 既定は読むだけ。
+    let gain = |name: &str| -> Result<Option<u16>, String> {
+        match cli.str(name) {
+            None => Ok(None),
+            Some(v) => {
+                let k: u16 = v
+                    .parse()
+                    .map_err(|_| format!("--{name} {v:?} が数値ではありません"))?;
+                if k > 2000 {
+                    return Err(format!("--{name} {k} が範囲外です（0〜2000）"));
+                }
+                Ok(Some(k))
+            }
+        }
     };
+    let set = PidSet {
+        position: PidPartial {
+            kp: gain("set-position-kp")?,
+            ki: gain("set-position-ki")?,
+            kd: gain("set-position-kd")?,
+        },
+        speed: PidPartial {
+            kp: gain("set-speed-kp")?,
+            ki: gain("set-speed-ki")?,
+            kd: gain("set-speed-kd")?,
+        },
+        current: PidPartial {
+            kp: gain("set-current-kp")?,
+            ki: gain("set-current-ki")?,
+            kd: gain("set-current-kd")?,
+        },
+        torque_limit: gain("set-torque-limit")?.map(|v| v as i16),
+    };
+    let writing = !set.is_empty();
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
 
-    if let Some(kp) = set_kp {
-        match (only, only_joint) {
-            (Some(l), Some(k)) => println!(
-                "**{} の {} だけ**位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。",
-                l.prefix(),
-                LEG_JOINT_KINDS[k]
-            ),
-            (Some(l), None) => println!(
-                "**{} の 3 軸**の位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。",
-                l.prefix()
-            ),
-            _ => println!("**12 軸すべて**の位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。"),
+    if writing {
+        let target = match (only, only_joint) {
+            (Some(l), Some(k)) => format!("**{} の {} だけ**", l.prefix(), LEG_JOINT_KINDS[k]),
+            (Some(l), None) => format!("**{} の 3 軸**", l.prefix()),
+            _ => "**12 軸すべて**".to_string(),
+        };
+        let mut what: Vec<String> = Vec::new();
+        for (label, p) in [
+            ("位置", set.position),
+            ("速度", set.speed),
+            ("電流", set.current),
+        ] {
+            for (term, v) in [("Kp", p.kp), ("Ki", p.ki), ("Kd", p.kd)] {
+                if let Some(v) = v {
+                    what.push(format!("{label}{term}={v}"));
+                }
+            }
         }
+        if let Some(v) = set.torque_limit {
+            what.push(format!("トルクリミット={v}"));
+        }
+        println!(
+            "{target} に {} を書きます（0xC1、RAM のみ）。",
+            what.join(" ")
+        );
         println!("電源を切れば元に戻ります。ROM には書きません。");
-        println!("Ki/Kd は現状値を保ちます（読んでから書きます）。");
+        println!("**指定していない項は現状値を保ちます**（読んでから書きます）。");
         println!();
         println!("**`0x30` 系にしか応答しない個体には書けません**（未対応）。");
         println!("続けるなら Enter、やめるなら Ctrl-C");
@@ -1064,10 +1095,10 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if only.is_some_and(|l| l != leg) {
             continue;
         }
-        let req = match (set_kp, only_joint) {
-            (Some(kp), Some(k)) => BusRequest::SetPositionKpJoint(k, kp),
-            (Some(kp), None) => BusRequest::SetPositionKp(kp),
-            (None, _) => BusRequest::ReadPid,
+        let req = match (writing, only_joint) {
+            (true, Some(k)) => BusRequest::SetPidJoint(k, set),
+            (true, None) => BusRequest::SetPid(set),
+            (false, _) => BusRequest::ReadPid,
         };
         array.bus(leg).request(req).map_err(|e| e.to_string())?;
     }
@@ -1092,7 +1123,7 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     println!(
         "PID ゲイン（{}）",
-        if set_kp.is_some() {
+        if writing {
             "**書き込み後の読み直し**"
         } else {
             "**読むだけ。何も書きません**"
@@ -1100,8 +1131,19 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     );
     println!();
     println!(
-        "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}  経路",
-        "脚", "軸", "位Kp", "位Ki", "位Kd", "速Kp", "速Ki", "速Kd", "電Kp", "電Ki", "電Kd"
+        "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7}  経路",
+        "脚",
+        "軸",
+        "位Kp",
+        "位Ki",
+        "位Kd",
+        "速Kp",
+        "速Ki",
+        "速Kd",
+        "電Kp",
+        "電Ki",
+        "電Kd",
+        "トルク上限"
     );
     let mut missing = Vec::new();
     for leg in LegSlot::ALL {
@@ -1111,7 +1153,7 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         for (k, p) in array.bus(leg).pids().iter().enumerate() {
             match p {
                 Some(p) => println!(
-                    "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}  {}",
+                    "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7}  {}",
                     leg.prefix(),
                     LEG_JOINT_KINDS[k],
                     p.position_kp,
@@ -1123,6 +1165,10 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     p.current_kp,
                     p.current_ki,
                     p.current_kd,
+                    match p.torque_limit {
+                        Some(v) => v.to_string(),
+                        None => "-".to_string(),
+                    },
                     p.via.label()
                 ),
                 None => {
@@ -1141,7 +1187,12 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     if missing.is_empty() {
         println!("経路: `0x30` は未文書の旧インタフェース（Kd を持たない）、");
         println!("`0xC0` はマニュアル §18。**個体によって応答するものが違う。**");
-        println!("コンプライアンスを上げるなら**位置 Kp を下げる**のが第一手です。");
+        println!("**コンプライアンスは電流ループの Kd が効く**（実機で確認）。");
+        println!("位置ループの Kp/Ki を下げても手応えはあまり変わらない。");
+        println!("`--set-torque-limit` は押し返す力そのものを頭打ちにする別の手。");
+        println!();
+        println!("**旧インタフェース（0x30）の個体には Kd を書けません。**");
+        println!("値が Kp/Ki の 6 個しかなく、Kd の枠が無いためです。");
     } else {
         println!("**読めなかった軸: {}**", missing.join(", "));
         println!("`0x30`（未文書）と `0xC0`（マニュアル §18）の両方を試して");

@@ -197,10 +197,16 @@ calib のサブコマンド:
                                         ドライバの異常フラグを消す 0x9B
                                         **原因が残っている間は消えない**
                                         --dry-run なら何も送らず状態だけ見る
-  pid             [--leg FL] [--set-position-kp N]
+  pid             [--leg FL] [--joint thigh]
                                         PID ゲインを読む（0x30 / 0xC0 自動）
-                                        --set-position-kp で位置 Kp を書く
+        [--set-position-kp N] [--set-position-ki N] [--set-position-kd N]
+        [--set-speed-kp N]    [--set-speed-ki N]    [--set-speed-kd N]
+        [--set-current-kp N]  [--set-current-ki N]  [--set-current-kd N]
+                                        指定した項だけ書く（0〜2000）
                                         **0xC1、RAM のみ。電源で元に戻る**
+        [--set-torque-limit N]          トルク電流リミット 0x1E（0〜2000）
+                                        押し返す力そのものを頭打ちにする
+                                        **柔らかくするなら電流ループの Kd**
   restart         [--leg FL] [--joint thigh]
                                         ドライバを再起動 0x07（電源再投入と等価）
                                         **マルチターン原点がリセットされる**
@@ -300,6 +306,15 @@ const VALUE_FLAGS: &[&str] = &[
     "viz-rate",
     "viz-endpoint",
     "set-position-kp",
+    "set-position-ki",
+    "set-position-kd",
+    "set-speed-kp",
+    "set-speed-ki",
+    "set-speed-kd",
+    "set-current-kp",
+    "set-current-ki",
+    "set-current-kd",
+    "set-torque-limit",
     "tilt-roll",
     "tilt-pitch",
     "tilt-yaw",
