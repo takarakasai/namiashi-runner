@@ -194,7 +194,18 @@ fn write_pids(driver: &mut Rs485Driver, id: MotorId, set: PidSet) -> lkmotor_dri
         driver.write_control_pid_ram(id, param, want)?;
     }
     if let Some(v) = set.torque_limit {
-        driver.write_control_i16_ram(id, ControlParamId::TorqueLimit, v)?;
+        // **documented を先に、駄目なら旧インタフェース。**
+        //
+        // `0x1E`（`0xC1` 経由）に応答しない世代のファームが混ざっている。
+        // そちらには `0x38` がある。トルク上限は関節を back-drivable に
+        // する実効的なレバーなので、**12 軸そろえられるかどうかがここで
+        // 決まる**。
+        if driver
+            .write_control_i16_ram(id, ControlParamId::TorqueLimit, v)
+            .is_err()
+        {
+            driver.write_max_torque_ram(id, v)?;
+        }
     }
     Ok(())
 }
@@ -243,7 +254,7 @@ fn read_documented_pids(driver: &mut Rs485Driver, id: MotorId) -> Option<JointPi
     // トルクリミットは読めなくても致命的ではない（表示が `-` になるだけ）。
     let torque_limit = match driver.read_control_param(id, ControlParamId::TorqueLimit) {
         Ok(ControlParamValue::TorqueLimit(v)) => Some(v),
-        _ => None,
+        _ => driver.read_max_torque(id).ok(),
     };
     Some(JointPids {
         position_kp: pos.kp,
@@ -1062,10 +1073,13 @@ impl BusWorker {
     /// 柔らかい設定で運用するなら毎回書き直すしかなく、手作業にすると
     /// 必ず忘れる。
     ///
-    /// **書けない個体がある。** `0xC0`/`0xC1` に応答しないファーム世代が
-    /// 混ざっており、そちらは既定値のまま残る。**硬い軸と柔らかい軸が
-    /// 混在する**ので、書けなかった軸を必ず名指しで出す。黙って一部だけ
-    /// 適用するのが一番危ない。
+    /// **PID は書けない個体がある。** `0xC0`/`0xC1` に応答しないファーム
+    /// 世代が混ざっており、そちらは既定値のまま残る。ただし
+    /// **トルク上限は旧インタフェース（`0x38`）で書ける**ので、12 軸
+    /// そろえられる見込みがある。
+    ///
+    /// 書けなかった軸は必ず名指しで出す。黙って一部だけ適用するのが
+    /// 一番危ない。
     fn apply_startup_pids(&mut self) {
         if self.startup_pid.is_empty() {
             return;
@@ -1201,7 +1215,12 @@ impl BusWorker {
                         current_kp: p.current_kp as u16,
                         current_ki: p.current_ki as u16,
                         current_kd: 0,
-                        torque_limit: None,
+                        // 旧世代でも `0x37` で読める見込み。
+                        torque_limit: <Rs485Driver as lkmotor_driver::LkCommands>::read_max_torque(
+                            &mut self.driver,
+                            id,
+                        )
+                        .ok(),
                         via: PidInterface::Legacy,
                     })
                     .or_else(|| read_documented_pids(&mut self.driver, id));
