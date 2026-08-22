@@ -40,8 +40,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("range") => range(cfg, cli),
         Some("zero") => zero(cfg, cli),
         Some("clear-multiturn") => clear_multiturn(cfg, cli),
+        Some("single-turn") => single_turn(cfg, cli),
         Some(other) => Err(format!(
-            "未知の calib サブコマンド {other:?}（scan|move|range|zero|clear-multiturn）"
+            "未知の calib サブコマンド {other:?}（scan|move|range|zero|clear-multiturn|single-turn）"
         )),
         None => Err(
             "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
@@ -624,4 +625,115 @@ fn read_line() -> String {
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
     line
+}
+
+/// `calib single-turn` — 単回転絶対角（`0x94`）を 12 軸ぶん読む。**読むだけ。**
+///
+/// # 何の役に立つのか
+///
+/// いま位置の基準にしている `0x92`（マルチターン）は、**電源投入時の姿勢が
+/// 0** になる。つまりモータ電源を切ると 12 軸の `zero_pose_rad` が全部無効に
+/// なり、メカ作業のたびに測り直しになる。
+///
+/// `0x94` の基準はドライバの ROM に入ったエンコーダゼロなので、**電源 OFF/ON
+/// をまたいで同じ値になる**。代わりに 1 モータ回転で一周する:
+///
+/// | 軸 | 減速比 | 一周 = 関節 |
+/// |---|---|---|
+/// | hip / thigh | 10.0 | 36.0° |
+/// | calf | 15.556 | 23.1° |
+///
+/// 何回転目かは別の手段（既知の姿勢で電源を入れる、メカ端に当てる、など）で
+/// 決める。**その精度は「一周の半分」でよい**ので、いまの「毎回まったく同じ
+/// 伏せ姿勢」より要求がずっと緩い。
+///
+/// # 使い方
+///
+/// 再現性の確認:
+/// 1. これを実行して `0x94 raw` を控える
+/// 2. **関節を動かさずに**モータ電源を OFF → ON
+/// 3. もう一度実行して raw が一致するか見る
+fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let only = leg_filter(cli)?;
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        array
+            .bus(leg)
+            .request(BusRequest::ReadSingleTurn)
+            .map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(SETTLE);
+
+    println!("単回転絶対角 0x94（**読むだけ。何も書きません**）");
+    println!();
+    println!(
+        "{:<4} {:<6} {:>10} {:>10} {:>12} {:>12}",
+        "脚", "軸", "0x94 raw", "モータ°", "関節内°", "一周=関節°"
+    );
+    let mut missing = Vec::new();
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        let bus = array.bus(leg);
+        let raw = bus.single_turn();
+        for (k, v) in raw.iter().enumerate() {
+            let gear = cfg
+                .hardware
+                .bus_for(leg)
+                .and_then(|b| b.motors.get(k))
+                .map_or(cfg.hardware.legs.gear_ratio, |m| {
+                    m.gear_ratio_or(cfg.hardware.legs.gear_ratio)
+                });
+            let wrap_deg = 360.0 / gear;
+            match v {
+                Some(c) => {
+                    let motor_deg = *c as f64 / 100.0;
+                    println!(
+                        "{:<4} {:<6} {:>10} {:>10.2} {:>12.3} {:>12.2}",
+                        leg.prefix(),
+                        LEG_JOINT_KINDS[k],
+                        c,
+                        motor_deg,
+                        motor_deg / gear,
+                        wrap_deg
+                    );
+                }
+                None => {
+                    println!(
+                        "{:<4} {:<6} {:>10} {:>10} {:>12} {:>12.2}",
+                        leg.prefix(),
+                        LEG_JOINT_KINDS[k],
+                        "**読めず**",
+                        "-",
+                        "-",
+                        wrap_deg
+                    );
+                    missing.push(format!("{} {}", leg.prefix(), LEG_JOINT_KINDS[k]));
+                }
+            }
+        }
+    }
+    println!();
+    if missing.is_empty() {
+        println!("**raw を控えておくこと。** 電源 OFF/ON をまたいで一致すれば、");
+        println!("ここを基準にした電源非依存のゼロ点が作れる。");
+    } else {
+        println!("**読めなかった軸がある: {}**", missing.join(", "));
+        println!("直近エラー:");
+        for leg in LegSlot::ALL {
+            let e = array.bus(leg).last_error();
+            if !e.is_empty() {
+                println!("  {} {}", leg.prefix(), e);
+            }
+        }
+    }
+    Ok(())
 }

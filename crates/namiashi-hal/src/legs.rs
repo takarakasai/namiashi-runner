@@ -107,6 +107,15 @@ pub enum BusRequest {
     ClearMultiTurn,
     /// 1 軸だけマルチターンカウンタを 0 に戻す。検証用。
     ClearMultiTurnJoint(usize),
+    /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
+    ///
+    /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
+    /// ドライバの ROM に入ったエンコーダゼロが基準なので、**電源 OFF/ON を
+    /// またいで同じ値になる**。代わりに 1 モータ回転で一周するので、
+    /// 何回転目かは別の手段（既知の電源投入姿勢など）で決める必要がある。
+    ///
+    /// 結果は [`LegBus::single_turn`] で取る。
+    ReadSingleTurn,
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +128,9 @@ struct BusSlot {
     last_error: Mutex<String>,
     /// ゼロ出し済みか。位置指令はこれが立つまで送らない。
     anchored: AtomicBool,
+    /// 直近の [`BusRequest::ReadSingleTurn`] の結果（0.01°/LSB, 0..=35999）。
+    /// 読めなかった軸は `None`。
+    single_turn: Mutex<[Option<u32>; 3]>,
 }
 
 /// 1 本の脚バスへのハンドル。
@@ -149,6 +161,12 @@ impl LegBus {
     /// 最新のフィードバック。
     pub fn state(&self) -> [JointState; 3] {
         *lock(&self.slot.state)
+    }
+
+    /// 直近の [`BusRequest::ReadSingleTurn`] で読んだ単回転絶対角
+    /// （0.01°/LSB, 0..=35999）。まだ読んでいない・読めなかった軸は `None`。
+    pub fn single_turn(&self) -> [Option<u32>; 3] {
+        *lock(&self.slot.single_turn)
     }
 
     pub fn stats(&self) -> BusStats {
@@ -795,6 +813,13 @@ impl BusWorker {
                 BusRequest::Zero => Ok(()),
                 BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_) => {
                     self.motors[k].clear_multi_turn(&mut self.driver)
+                }
+                // 失敗した軸に古い値を残さないよう、読む前に落とす。
+                BusRequest::ReadSingleTurn => {
+                    lock(&self.slot.single_turn)[k] = None;
+                    self.motors[k]
+                        .read_single_turn_angle_centideg(&mut self.driver)
+                        .map(|v| lock(&self.slot.single_turn)[k] = Some(v))
                 }
             };
             if let Err(e) = result {

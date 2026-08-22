@@ -183,6 +183,10 @@ calib のサブコマンド:
         --secs 0（以下）/ --forever なら Ctrl-C で確定
         （打ち切っても集計と --write は走る）
   zero  [--pose NAME] [--write PATH]    全軸ゼロ出し + zero_pose_rad を記録
+  clear-multiturn [--leg FL] [--joint thigh]
+                                        マルチターンを 0 に戻す（電源 OFF/ON 相当）
+  single-turn     [--leg FL]            単回転絶対角 0x94 を読む（**読むだけ**）
+                                        電源 OFF/ON をまたいで一致する唯一の値
 
   1 度に 1 軸しか投入せず、既定の振り幅は 5°・速度 0.3 rad/s。
   --write を付けたときだけ設定ファイルへ書き戻す。
