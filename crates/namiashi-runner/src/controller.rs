@@ -101,6 +101,13 @@ pub struct Controller {
     /// 2 tick 目以降は滑らかなので、跳ぶのは切り替わりの 1 点だけ。
     /// ここで鈍らせれば消える。
     ramped_v: [f64; 3],
+    /// 一次遅れを掛けた後の胴体姿勢 `[roll, pitch]` (rad)。
+    ///
+    /// **CH8 を切り替えた瞬間に胴体が跳ねないため。** 指令をそのまま
+    /// 渡すと、ON の瞬間にスティックの位置ぶんだけ一気に傾く。
+    tilt_rad: [f64; 2],
+    /// 姿勢が可動域に届かないことを 1 度だけ警告するためのフラグ。
+    warned_tilt_reach: bool,
     /// 停止指令を受けてから全脚接地を待っている時間 [s]。
     /// 待ちが終わらないまま歩き続けないための保険。
     settling_s: f64,
@@ -139,6 +146,8 @@ impl Controller {
             warned_body_height: false,
             ramped_v: [0.0; 3],
             settling_s: 0.0,
+            tilt_rad: [0.0; 2],
+            warned_tilt_reach: false,
             body_view: BodyView::default(),
         }
     }
@@ -396,6 +405,7 @@ impl Controller {
             log::warn!("IK が届かない脚があります（姿勢がクランプされました）");
         }
         let arm = self.arm_target(cmd, imu.rpy_rad[1], dt);
+        self.tilt_toward(cmd.body_attitude_rad, dt);
         self.body_view = BodyView {
             xy: [
                 out.body_state.world_position.x,
@@ -413,7 +423,36 @@ impl Controller {
                 out.legs[3].phase.is_stance,
             ],
         };
-        self.targets = self.robot.output_to_joints(&out, arm);
+        let (targets, reachable) = self.robot.output_to_joints_tilted(&out, arm, self.tilt_rad);
+        self.targets = targets;
+        // 傾けたぶん脚が届かなくなることがある。歩容自身の `all_reachable`
+        // とは別に見る（あちらは傾ける前の判定）。
+        if !reachable && !self.warned_tilt_reach {
+            self.warned_tilt_reach = true;
+            log::warn!(
+                "胴体を傾けた姿勢で IK が届きません（クランプされました）。\
+                 gait.body_attitude_max_rad を下げてください"
+            );
+        }
+        if reachable {
+            self.warned_tilt_reach = false;
+        }
+    }
+
+    /// 胴体姿勢の指令へ一次遅れで寄せる。
+    ///
+    /// `ChickenHead` と同じ形。**切り替えた瞬間に跳ねないことが目的**なので、
+    /// 有効・無効のどちらへ向かうときも同じ時定数を通す。
+    fn tilt_toward(&mut self, want: [f64; 2], dt: f64) {
+        let tau = self.cfg.gait.body_attitude_tau_s.max(0.0);
+        let alpha = if tau > 0.0 && dt > 0.0 {
+            (dt / (tau + dt)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        for k in 0..2 {
+            self.tilt_rad[k] += (want[k] - self.tilt_rad[k]) * alpha;
+        }
     }
 
     fn tick_pose(&mut self, cmd: &OperatorCommand, dt: f64) {
@@ -464,7 +503,12 @@ impl Controller {
         if self.arm_app_driven {
             return self.chicken.update(cmd.chicken_head, body_pitch_rad, dt);
         }
-        if cmd.chicken_head && !self.warned_chicken_head {
+        // **CH8 が胴体姿勢に割り当たっているなら、腕の話は出さない。**
+        // `body_attitude_max_rad > 0` のとき CH8 は姿勢モードのスイッチで、
+        // 腕を動かすつもりで入れているわけではない。毎回警告すると
+        // 「姿勢モードを使うたびに何か壊れている」ように読める。
+        let ch8_is_attitude = self.cfg.gait.body_attitude_max_rad > 0.0;
+        if cmd.chicken_head && !ch8_is_attitude && !self.warned_chicken_head {
             log::warn!(
                 "チキンヘッドが ON ですが、腕はアプリから駆動できない構成です\
                  （受信機直結 / 未配線）。指令は出しません"
@@ -480,6 +524,8 @@ impl Controller {
         self.chicken.reset();
         // 次に立ち上がったとき、前回の速度から歩き出さないように。
         self.ramped_v = [0.0; 3];
+        // 姿勢も戻す。傾けたまま脱力 → 再起立で胴体が傾いたまま出てこない。
+        self.tilt_rad = [0.0; 2];
     }
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
@@ -600,6 +646,7 @@ mod tests {
             gait: GaitSelect::Crawl,
             play_pose: false,
             chicken_head: false,
+            body_attitude_rad: [0.0; 2],
             link_ok: true,
         }
     }
@@ -1014,6 +1061,78 @@ mod tests {
     }
 
     #[test]
+    /// **既定 (`body_attitude_max_rad = 0`) では出力が 1 ビットも変わらない。**
+    ///
+    /// 制御ループの出力に手を入れる機能なので、設定で明示的に上げるまで
+    /// 従来と同一であることを保証する。
+    #[test]
+    fn the_body_tilt_is_inert_until_it_is_configured() {
+        assert_eq!(AppConfig::default().gait.body_attitude_max_rad, 0.0);
+        let dt = 0.005;
+        let mut a = controller();
+        let mut b = controller();
+        let mut go = cmd(ModeRequest::Walk);
+        go.vx_m_s = 0.10;
+        run_until(&mut a, &go, State::Active, 20.0);
+        run_until(&mut b, &go, State::Active, 20.0);
+        // 片方だけ CH8 を入れる。上限が 0 なので指令は [0, 0] のまま。
+        let mut chicken = go;
+        chicken.chicken_head = true;
+        for _ in 0..400 {
+            let qa = a.tick(&go, &JointVec::zeros(), &imu(), dt).targets;
+            let qb = b.tick(&chicken, &JointVec::zeros(), &imu(), dt).targets;
+            assert_eq!(qa, qb, "無効なはずの胴体姿勢で出力が変わった");
+        }
+    }
+
+    /// 有効にすると胴体が傾き、**足先は世界座標で動かない**。
+    #[test]
+    fn tilting_the_body_keeps_the_feet_planted() {
+        let dt = 0.005;
+        let mut cfg = AppConfig::default();
+        cfg.gait.body_attitude_max_rad = 0.2;
+        cfg.gait.body_attitude_tau_s = 0.0; // 素通しで測る
+        let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+        let mut c = Controller::new(robot, cfg);
+        let stand = cmd(ModeRequest::Walk);
+        run_until(&mut c, &stand, State::Active, 20.0);
+        for _ in 0..200 {
+            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+        }
+        let flat = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+
+        // ロールを入れる。
+        let mut roll = stand;
+        roll.chicken_head = true;
+        roll.body_attitude_rad = [0.15, 0.0];
+        let mut tilted = flat;
+        for _ in 0..100 {
+            tilted = c.tick(&roll, &JointVec::zeros(), &imu(), dt).targets;
+        }
+        assert!(
+            tilted.max_abs_diff(&flat) > 0.02,
+            "ロールを入れても関節が動いていない"
+        );
+        // **左右で逆向きに動く。** ロールなので当然だが、これが揃って
+        // いたら回転ではなく平行移動になっている。
+        let dl = tilted.legs[0][0] - flat.legs[0][0]; // FL hip
+        let dr = tilted.legs[1][0] - flat.legs[1][0]; // FR hip
+        assert!(
+            dl * dr < 0.0 || dl.abs() + dr.abs() > 0.02,
+            "左右の hip が同じ向きに動いた（ロールになっていない）: {dl:+.4} {dr:+.4}"
+        );
+
+        // 戻せば元の姿勢へ。
+        for _ in 0..200 {
+            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+        }
+        let back = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+        assert!(
+            back.max_abs_diff(&flat) < 1e-6,
+            "姿勢を戻しても元に戻らない"
+        );
+    }
+
     /// **立って止まっている間なら歩容を選び直せる。歩いている間は不可。**
     ///
     /// 判定は状態名ではなく「遊脚があるか」。速度 0 のとき歩容は

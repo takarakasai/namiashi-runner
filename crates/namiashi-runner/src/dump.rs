@@ -27,6 +27,13 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let vy = cli.f64("vy").unwrap_or(0.0);
     let wz = cli.f64("wz").unwrap_or(0.0);
     let seconds = cli.f64("secs").unwrap_or(4.0);
+    // 胴体を傾けたときに可動域へ収まるかを、実機に触れずに確かめる。
+    // **傾けると脚の可動域を食う**ので、`body_attitude_max_rad` を上げる前に
+    // ここで当たりを取る。
+    let tilt = [
+        cli.f64("tilt-roll").unwrap_or(0.0),
+        cli.f64("tilt-pitch").unwrap_or(0.0),
+    ];
     let every = cli.usize("every").unwrap_or(20).max(1);
     let viz_cfg = crate::viz_config(cli);
     // 可視化するときは実時間で流さないと早送りになる。--realtime は
@@ -59,14 +66,24 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         mode: ModeRequest::Walk,
         gait,
         play_pose: false,
-        chicken_head: false,
+        chicken_head: tilt != [0.0; 2],
+        body_attitude_rad: tilt,
         link_ok: true,
     };
 
     println!(
-        "歩容 {} / v=({vx:+.3}, {vy:+.3}, {wz:+.3}) / {:.0} Hz / {seconds:.1} s",
+        "歩容 {} / v=({vx:+.3}, {vy:+.3}, {wz:+.3}) / {:.0} Hz / {seconds:.1} s{}",
         gait.label(),
-        cfg.control.rate_hz
+        cfg.control.rate_hz,
+        if tilt == [0.0; 2] {
+            String::new()
+        } else {
+            format!(
+                " / 胴体 roll {:+.1}° pitch {:+.1}°",
+                tilt[0].to_degrees(),
+                tilt[1].to_degrees()
+            )
+        }
     );
     println!("t[s]   状態         {}", header());
 

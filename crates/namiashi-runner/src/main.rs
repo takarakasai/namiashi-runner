@@ -176,6 +176,9 @@ dump のオプション:
   --secs S                  再生時間（既定 4）
   --every N                 N 周期ごとに 1 行出す（既定 20）
   --realtime                実時間で流す（--viz で articara に見せるとき用）
+  --tilt-roll R --tilt-pitch P
+                            胴体を傾けた姿勢で可動域を確かめる [rad]
+                            （実機の CH8 + CH1/CH3 と同じ経路を通る）
 
 calib のサブコマンド:
   scan  [--leg FL] [--max-id N]         応答するモータ id を数える（指令なし）
@@ -292,6 +295,8 @@ const VALUE_FLAGS: &[&str] = &[
     "viz-key-measured",
     "viz-rate",
     "viz-endpoint",
+    "tilt-roll",
+    "tilt-pitch",
 ];
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。

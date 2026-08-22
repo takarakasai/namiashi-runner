@@ -210,6 +210,22 @@ pub struct GaitTuning {
     /// かつて 2.0 s 固定だったため、停止に最大 2.5 s かかっていた。
     #[serde(default = "default_stop_settle_s")]
     pub stop_settle_s: f64,
+    /// 胴体姿勢をプロポで傾けられる上限 (rad)。**0 で機能ごと無効**。
+    ///
+    /// CH8 が ON のとき、CH1 がロール、CH3 がピッチになる（OFF のときは
+    /// CH1 = 横移動、CH3 = 高さのまま）。歩容が出した足先位置を回してから
+    /// IK を解き直すので、**足は接地したまま胴体だけ傾く**。
+    ///
+    /// **傾けると脚の可動域を食う。** `start` ポーズの calf は可動域まで
+    /// 10°、`constrain_2` は 5.55° しかない。大きくすると IK が届かない脚が
+    /// 出る（クランプされて姿勢が崩れる）。`dump` で範囲内に収まる角度を
+    /// 確かめてから上げること。
+    #[serde(default)]
+    pub body_attitude_max_rad: f64,
+    /// 胴体姿勢の追従時定数 (s)。CH8 を切り替えた瞬間に胴体が跳ねないよう
+    /// 一次遅れを入れる。0 で素通し。
+    #[serde(default = "default_body_attitude_tau_s")]
+    pub body_attitude_tau_s: f64,
     /// 歩容種別ごとの周期 (s)。指定が無ければ `quadruped-gait` のプリセット値。
     #[serde(default)]
     pub crawl_cycle_s: Option<f64>,
@@ -247,6 +263,10 @@ fn default_stop_settle_s() -> f64 {
     0.25
 }
 
+fn default_body_attitude_tau_s() -> f64 {
+    0.15
+}
+
 fn default_height_range() -> f64 {
     0.04
 }
@@ -264,6 +284,10 @@ impl Default for GaitTuning {
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),
             stop_settle_s: default_stop_settle_s(),
+            // **既定は無効。** 制御ループの出力に手が入る機能なので、
+            // 設定で明示的に上げるまで従来と 1 ビットも変わらない出力を出す。
+            body_attitude_max_rad: 0.0,
+            body_attitude_tau_s: default_body_attitude_tau_s(),
             crawl_cycle_s: None,
             walk_cycle_s: None,
             trot_cycle_s: None,

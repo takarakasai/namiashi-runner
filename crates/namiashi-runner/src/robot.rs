@@ -99,6 +99,52 @@ impl Robot {
     /// 歩容の出力（IK 座標系）をモデル座標系の関節ベクトルへ直す。
     ///
     /// 腕は歩容の管轄外なので `arm` はそのまま持ち越す。
+    /// 胴体を `[roll, pitch]` (rad) 傾けた姿勢の関節角。
+    ///
+    /// **足先は世界座標で動かさない。** 歩容が出した足先位置（胴体座標系）を
+    /// 逆向きに回してから IK を解き直すので、接地したまま胴体だけが傾く。
+    ///
+    /// 歩容側に胴体姿勢の制御は無い（`set_body_attitude_observed` は
+    /// FullCentroidal 専用で、既定の Champ では no-op）。ここで足すしかない。
+    ///
+    /// `[0, 0]` のときは [`Self::output_to_joints`] にそのまま委ねる。
+    /// **無効時に 1 ビットも変わらないことを保証するため**、丸め誤差の入る
+    /// 経路を通さない。
+    pub fn output_to_joints_tilted(
+        &self,
+        out: &ControllerOutput,
+        arm: f64,
+        attitude_rad: [f64; 2],
+    ) -> (JointVec, bool) {
+        let [roll, pitch] = attitude_rad;
+        if roll == 0.0 && pitch == 0.0 {
+            return (self.output_to_joints(out, arm), out.all_reachable());
+        }
+        let mut q = JointVec::zeros();
+        q.arm = arm;
+        let mut reachable = true;
+        // 胴体を +roll / +pitch 傾ける = 胴体座標系で見た足先を −roll / −pitch
+        // 回す。順序は Rx(−roll) → Ry(−pitch)。
+        let (sr, cr) = (-roll).sin_cos();
+        let (sp, cp) = (-pitch).sin_cos();
+        for (slot, leg_out) in out.legs.iter().enumerate() {
+            let f = leg_out.foot_body;
+            // Rx(−roll)
+            let (y1, z1) = (f.y * cr - f.z * sr, f.y * sr + f.z * cr);
+            // Ry(−pitch)
+            let (x2, z2) = (f.x * cp + z1 * sp, -f.x * sp + z1 * cp);
+            let target = nalgebra::Vector3::new(x2, y1, z2);
+            // 膝はすべて後ろ向き（`build_gait` の `KneePattern::BothBack`）。
+            // ここが食い違うと逆向きに曲がった解が返る。
+            let sol = quadruped_gait::solve_leg_ik(self.kin.leg(leg_out.leg), target, false);
+            reachable &= sol.is_reachable();
+            let (hip, thigh, calf) = sol.angles();
+            let s = self.signs[slot];
+            q.legs[slot] = [hip * s[0], thigh * s[1], calf * s[2]];
+        }
+        (q, reachable)
+    }
+
     pub fn output_to_joints(&self, out: &ControllerOutput, arm: f64) -> JointVec {
         let mut q = JointVec::zeros();
         q.arm = arm;

@@ -330,6 +330,12 @@ pub struct OperatorCommand {
     /// ポーズ再生スイッチの**立ち上がり**。押し続けても 1 回しか立たない。
     pub play_pose: bool,
     pub chicken_head: bool,
+    /// 胴体姿勢の指令 `[roll, pitch]` (rad)。`chicken_head` が false なら `[0, 0]`。
+    ///
+    /// CH8 が ON のとき、CH1 をロール、CH3 をピッチに読み替える。
+    /// **同時に横移動と高さは 0 になる** — 同じスティックを 2 つの意味で
+    /// 使えないため。
+    pub body_attitude_rad: [f64; 2],
     /// 受信が生きているか。false のときの速度は必ず 0 になっている。
     pub link_ok: bool,
 }
@@ -358,6 +364,7 @@ impl OperatorCommand {
             gait,
             play_pose: false,
             chicken_head: false,
+            body_attitude_rad: [0.0; 2],
             link_ok: false,
         }
     }
@@ -370,6 +377,8 @@ pub struct Teleop {
     max_vy: f64,
     max_wz: f64,
     height_range: f64,
+    /// 胴体姿勢の上限 (rad)。**0 なら CH8 を入れても傾かない**（機能無効）。
+    attitude_max: f64,
     /// 腕の可動域。観測した軸値 (-1..1) をこの範囲へ写す。
     arm_range_rad: (f64, f64),
     prev_pose_on: bool,
@@ -392,6 +401,7 @@ impl Teleop {
             max_vy: gait.max_vy_m_s,
             max_wz: gait.max_wz_rad_s,
             height_range: gait.height_range_m,
+            attitude_max: gait.body_attitude_max_rad,
             arm_range_rad: (arm.min_rad, arm.max_rad),
             prev_pose_on: false,
             last_gait: GaitSelect::Crawl,
@@ -444,16 +454,38 @@ impl Teleop {
         let play_pose = pose_on && !self.prev_pose_on;
         self.prev_pose_on = pose_on;
 
+        // **CH8 が ON の間、CH1 と CH3 は胴体姿勢に化ける。**
+        // 同じスティックを 2 つの意味で使うので、横移動と高さは 0 にする
+        // （両方効かせると「傾けながら横に流れる」になって操縦できない）。
+        let chicken_head = self.cfg.chicken_head.position(state) > 0;
+        let (vy, height, attitude) = if chicken_head {
+            (
+                0.0,
+                0.0,
+                [
+                    self.cfg.vy.value(state) * self.attitude_max,
+                    self.cfg.height.value(state) * self.attitude_max,
+                ],
+            )
+        } else {
+            (
+                self.cfg.vy.value(state) * self.max_vy,
+                self.cfg.height.value(state) * self.height_range,
+                [0.0; 2],
+            )
+        };
+
         OperatorCommand {
             vx_m_s: self.cfg.vx.value(state) * self.max_vx,
-            vy_m_s: self.cfg.vy.value(state) * self.max_vy,
+            vy_m_s: vy,
             wz_rad_s: self.cfg.wz.value(state) * self.max_wz,
-            height_offset_m: self.cfg.height.value(state) * self.height_range,
+            height_offset_m: height,
             arm_rad: self.arm_angle(state),
             mode,
             gait,
             play_pose,
-            chicken_head: self.cfg.chicken_head.position(state) > 0,
+            chicken_head,
+            body_attitude_rad: attitude,
             link_ok: true,
         }
     }
