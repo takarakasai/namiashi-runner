@@ -766,6 +766,9 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let before = report_faults(&array, only);
     if before == 0 {
         println!("  異常なし。何もしません");
+        println!();
+        println!("**このコマンドは異常が無ければ何も書きません。**");
+        println!("電圧つきの 12 軸の状態を見るだけの用途に使えます。");
         return Ok(());
     }
 
