@@ -166,6 +166,69 @@ impl PidSet {
     }
 }
 
+/// 旧インタフェース（`0x31`、RAM）で Kp/Ki を書く。
+///
+/// **Kd は入らない。** 旧世代のドライバには微分項の枠が無いので、
+/// `kd` が指定されていても捨てるしかない。**黙って捨てない** — 呼び出し
+/// 側が「12 軸そろった」と誤解するのが一番危ないので、警告を出す。
+///
+/// ゲインは `u8`。255 を超える値も表現できないので同じく警告する。
+fn write_legacy_pids(
+    driver: &mut Rs485Driver,
+    id: MotorId,
+    set: PidSet,
+) -> lkmotor_driver::Result<()> {
+    use lkmotor_driver::protocol::response::LegacyPids;
+    use lkmotor_driver::LkCommands;
+    let now = driver.read_legacy_pids(id)?;
+    let mut dropped: Vec<&str> = Vec::new();
+    let mut clamped: Vec<String> = Vec::new();
+    let mut pick = |want: Option<u16>, current: u8, label: &'static str| -> u8 {
+        match want {
+            None => current,
+            Some(v) if v <= 255 => v as u8,
+            Some(v) => {
+                clamped.push(format!("{label}={v}→255"));
+                255
+            }
+        }
+    };
+    let next = LegacyPids {
+        position_kp: pick(set.position.kp, now.position_kp, "位置Kp"),
+        position_ki: pick(set.position.ki, now.position_ki, "位置Ki"),
+        speed_kp: pick(set.speed.kp, now.speed_kp, "速度Kp"),
+        speed_ki: pick(set.speed.ki, now.speed_ki, "速度Ki"),
+        current_kp: pick(set.current.kp, now.current_kp, "電流Kp"),
+        current_ki: pick(set.current.ki, now.current_ki, "電流Ki"),
+    };
+    for (label, kd) in [
+        ("位置", set.position.kd),
+        ("速度", set.speed.kd),
+        ("電流", set.current.kd),
+    ] {
+        if kd.is_some() {
+            dropped.push(label);
+        }
+    }
+    if !dropped.is_empty() {
+        log::warn!(
+            "モータ {} は旧インタフェース（0x31）なので **{} の Kd を書けません**。\
+             他の軸と特性が変わります",
+            id.get(),
+            dropped.join(" / ")
+        );
+    }
+    if !clamped.is_empty() {
+        log::warn!(
+            "モータ {} は旧インタフェースなのでゲインが u8 です。**{}** に丸めました",
+            id.get(),
+            clamped.join(", ")
+        );
+    }
+    driver.write_legacy_pids_ram(id, next)?;
+    Ok(())
+}
+
 /// 指定された項だけ書き換える（`0xC1`、RAM）。
 ///
 /// **読んでから書く。** 3 つ組で送る仕様なので、現状値を知らずに書くと
@@ -174,12 +237,21 @@ fn write_pids(driver: &mut Rs485Driver, id: MotorId, set: PidSet) -> lkmotor_dri
     use lkmotor_driver::protocol::command::ControlParamId;
     use lkmotor_driver::protocol::response::{ControlParamValue, PidTriple};
     use lkmotor_driver::LkCommands;
+    let want_pid = !set.position.is_empty() || !set.speed.is_empty() || !set.current.is_empty();
+    // documented (`0xC0`/`0xC1`) が通るか、1 ループ読んで判定する。
+    let documented = !want_pid
+        || driver
+            .read_control_param(id, ControlParamId::PositionLoopPid)
+            .is_ok();
+    if want_pid && !documented {
+        write_legacy_pids(driver, id, set)?;
+    }
     for (param, part) in [
         (ControlParamId::PositionLoopPid, set.position),
         (ControlParamId::SpeedLoopPid, set.speed),
         (ControlParamId::CurrentLoopPid, set.current),
     ] {
-        if part.is_empty() {
+        if part.is_empty() || !documented {
             continue;
         }
         let now = match driver.read_control_param(id, param)? {
@@ -234,6 +306,34 @@ impl PidInterface {
             PidInterface::Documented => "0xC0",
         }
     }
+}
+
+/// どちらのインタフェースでもよいので PID を読む。
+///
+/// **旧（`0x30`）を先に試す。** 応答が速く、documented (`0xC0`) は
+/// 3 ループぶん別々に問い合わせるので時間がかかる。
+///
+/// **書き込みの後もこれで読み直すこと。** `0xC0` だけで読み直していた
+/// ため、旧世代の軸は書いた直後に「読めず」になっていた（2026-08-22 に
+/// 実機で発覚）。書けたのか書けなかったのかが分からず、判断できない。
+fn read_pids_any(driver: &mut Rs485Driver, id: MotorId) -> Option<JointPids> {
+    use lkmotor_driver::LkCommands;
+    if let Ok(p) = driver.read_legacy_pids(id) {
+        return Some(JointPids {
+            position_kp: p.position_kp as u16,
+            position_ki: p.position_ki as u16,
+            position_kd: 0,
+            speed_kp: p.speed_kp as u16,
+            speed_ki: p.speed_ki as u16,
+            speed_kd: 0,
+            current_kp: p.current_kp as u16,
+            current_ki: p.current_ki as u16,
+            current_kd: 0,
+            torque_limit: driver.read_max_torque(id).ok(),
+            via: PidInterface::Legacy,
+        });
+    }
+    read_documented_pids(driver, id)
 }
 
 /// `0xC0`（マニュアル §18）で 3 ループぶんの PID を読む。
@@ -1179,7 +1279,8 @@ impl BusWorker {
                     self.driver.set_response_timeout(Duration::from_millis(200));
                     let r = write_pids(&mut self.driver, id, set);
                     // 書いた後の値を読み直す。応答を信じない。
-                    lock(&self.slot.pids)[k] = read_documented_pids(&mut self.driver, id);
+                    // **旧世代も読めるよう両方試す。**
+                    lock(&self.slot.pids)[k] = read_pids_any(&mut self.driver, id);
                     self.driver.set_response_timeout(self.response_timeout);
                     r
                 }
@@ -1200,30 +1301,7 @@ impl BusWorker {
                     // §18）に応答する個体が混在している。実測で 12 軸中
                     // 5 軸だけが `0x30` に答え、その内訳は再現した
                     // （= タイミングではなく個体差）。
-                    let got = <Rs485Driver as lkmotor_driver::LkCommands>::read_legacy_pids(
-                        &mut self.driver,
-                        id,
-                    )
-                    .ok()
-                    .map(|p| JointPids {
-                        position_kp: p.position_kp as u16,
-                        position_ki: p.position_ki as u16,
-                        position_kd: 0,
-                        speed_kp: p.speed_kp as u16,
-                        speed_ki: p.speed_ki as u16,
-                        speed_kd: 0,
-                        current_kp: p.current_kp as u16,
-                        current_ki: p.current_ki as u16,
-                        current_kd: 0,
-                        // 旧世代でも `0x37` で読める見込み。
-                        torque_limit: <Rs485Driver as lkmotor_driver::LkCommands>::read_max_torque(
-                            &mut self.driver,
-                            id,
-                        )
-                        .ok(),
-                        via: PidInterface::Legacy,
-                    })
-                    .or_else(|| read_documented_pids(&mut self.driver, id));
+                    let got = read_pids_any(&mut self.driver, id);
                     self.driver.set_response_timeout(self.response_timeout);
                     match got {
                         Some(p) => {
