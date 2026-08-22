@@ -628,9 +628,17 @@ fn print_teleop(t: &TeleopConfig) {
         t.vx.channel, t.vy.channel, t.wz.channel, t.height.channel
     );
     println!(
-        "  CH{} モード(脱力/初期姿勢/歩行)  CH{} 歩容(Crawl/Walk/Trot)  \
-         CH{} ポーズ再生  CH{} 姿勢モード(ON で CH1=ロール CH3=ピッチ)",
-        t.mode.channel, t.gait.channel, t.pose.channel, t.chicken_head.channel
+        "  CH{} モード(脱力/初期姿勢/歩行)  CH{} 歩容(Crawl/Walk/Trot)",
+        t.mode.channel, t.gait.channel
+    );
+    println!(
+        "  CH{} ポーズ再生  CH{} 振る足の選択(下=greeting 上=greeting_alt)  \
+         CH{} 姿勢モード(ON で CH{}=ロール CH{}=ピッチ)",
+        t.pose.channel,
+        t.pose_select.channel,
+        t.chicken_head.channel,
+        t.vy.channel,
+        t.height.channel
     );
     match &t.arm {
         Some(arm) => println!("  CH{} 腕（観測のみ。アプリからは駆動しない）", arm.channel),

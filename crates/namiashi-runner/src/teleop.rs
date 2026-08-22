@@ -171,6 +171,13 @@ pub struct TeleopConfig {
     pub pose: SwitchMap,
     /// チキンヘッド ON/OFF。
     pub chicken_head: SwitchMap,
+    /// **どちらの前足で手を振るか。** 下段で `poses.greeting`、
+    /// 上段で `poses.greeting_alt`。
+    ///
+    /// ポーズ再生 (CH7 相当) は「押した瞬間」の 1 発なので、選択は別の
+    /// スイッチで持つ必要がある。
+    #[serde(default = "default_pose_select")]
+    pub pose_select: SwitchMap,
     /// 腕サーボが繋がっているチャンネル（**受信機直結のときの観測用**）。
     ///
     /// アプリは腕を駆動しないが、同じチャンネルを読めば実機の腕がどこにいるか
@@ -200,6 +207,7 @@ impl Default for TeleopConfig {
             gait: SwitchMap::three_position(6),
             pose: SwitchMap::two_position(7),
             chicken_head: SwitchMap::two_position(8),
+            pose_select: default_pose_select(),
             arm: default_arm_axis(),
         }
     }
@@ -330,6 +338,8 @@ pub struct OperatorCommand {
     /// ポーズ再生スイッチの**立ち上がり**。押し続けても 1 回しか立たない。
     pub play_pose: bool,
     pub chicken_head: bool,
+    /// ポーズ再生で `greeting_alt` を選ぶか（CH10）。
+    pub play_alt: bool,
     /// 胴体姿勢の指令 `[roll, pitch]` (rad)。`chicken_head` が false なら `[0, 0]`。
     ///
     /// CH8 が ON のとき、CH1 をロール、CH3 をピッチに読み替える。
@@ -363,11 +373,16 @@ impl OperatorCommand {
             mode,
             gait,
             play_pose: false,
+            play_alt: false,
             chicken_head: false,
             body_attitude_rad: [0.0; 2],
             link_ok: false,
         }
     }
+}
+
+fn default_pose_select() -> SwitchMap {
+    SwitchMap::two_position(10)
 }
 
 /// プロポ入力の解釈器。スイッチの立ち上がり検出のため状態を持つ。
@@ -491,6 +506,7 @@ impl Teleop {
             mode,
             gait,
             play_pose,
+            play_alt: self.cfg.pose_select.position(state) > 0,
             chicken_head,
             body_attitude_rad: attitude,
             link_ok: true,
@@ -633,6 +649,25 @@ mod tests {
     ///
     /// 軸ごとに掛けると √2 倍になり、実測でも roll+pitch 同時 0.50 で
     /// 可動域を 917 件逸脱した（roll 単独なら 0.65 まで入る）。
+    /// **振る足の選択は専用スイッチ (CH10)。** 姿勢モード (CH8) とは独立。
+    ///
+    /// 当初は空きチャンネルが無いと思って CH8 を修飾キーにしていたが、
+    /// 実際は CH7 が腕で CH9/CH10 が空いていた。設定の
+    /// `[teleop.arm] channel` が 9 のままで実配線と食い違っていた。
+    #[test]
+    fn the_wave_leg_is_selected_by_its_own_switch() {
+        let mut t = Teleop::new(TeleopConfig::default(), &GaitTuning::default(), &arm_cfg());
+        // CH10 下段 → 既定のポーズ。
+        let cmd = t.update(&state_with(&[(10, RAW_MIN)]), true);
+        assert!(!cmd.play_alt);
+        // CH10 上段 → もう一方。
+        let cmd = t.update(&state_with(&[(10, RAW_MAX)]), true);
+        assert!(cmd.play_alt);
+        // **姿勢モード (CH8) とは独立。** CH8 を入れても選択は変わらない。
+        let cmd = t.update(&state_with(&[(10, RAW_MIN), (8, RAW_MAX)]), true);
+        assert!(!cmd.play_alt, "CH8 が振る足の選択に影響している");
+    }
+
     #[test]
     fn the_body_attitude_is_clamped_by_its_magnitude() {
         let mut gait = GaitTuning::default();

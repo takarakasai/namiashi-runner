@@ -362,8 +362,9 @@ impl Controller {
 
     fn tick_active(&mut self, cmd: &OperatorCommand, imu: &ImuSample, dt: f64) {
         if cmd.play_pose {
-            // 押した瞬間の CH8 で決める。再生中に CH8 を動かしても切り替わらない。
-            self.alt_pose_requested = cmd.chicken_head;
+            // 押した瞬間の選択スイッチで決める。再生中に動かしても
+            // 切り替わらない。
+            self.alt_pose_requested = cmd.play_alt;
             self.start_pose_playback();
             return;
         }
@@ -488,9 +489,8 @@ impl Controller {
     }
 
     fn start_pose_playback(&mut self) {
-        // **CH8 を押しながらだと別のものを再生する。** 空きチャンネルが無いので
-        // 姿勢モードのスイッチを修飾キーとして使う。`greeting_alt` が空なら
-        // 従来どおり `greeting` だけ。
+        // **選択スイッチ (CH10) が上段なら別のものを再生する。**
+        // `greeting_alt` が空なら従来どおり `greeting` だけ。
         let name = if self.alt_pose_requested && !self.cfg.poses.greeting_alt.is_empty() {
             self.cfg.poses.greeting_alt.clone()
         } else {
@@ -657,6 +657,7 @@ mod tests {
             mode,
             gait: GaitSelect::Crawl,
             play_pose: false,
+            play_alt: false,
             chicken_head: false,
             body_attitude_rad: [0.0; 2],
             link_ok: true,

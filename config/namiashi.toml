@@ -72,15 +72,19 @@ thresholds = [
 ]
 
 [teleop.pose]
-channel = 7
+channel = 9
 thresholds = [992]
 
 [teleop.chicken_head]
 channel = 8
 thresholds = [992]
 
+[teleop.pose_select]
+channel = 10
+thresholds = [992]
+
 [teleop.arm]
-channel = 9
+channel = 7
 raw_min = 172
 raw_center = 992
 raw_max = 1811
