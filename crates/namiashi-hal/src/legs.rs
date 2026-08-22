@@ -105,6 +105,8 @@ pub enum BusRequest {
     ///
     /// ROM には何も書かない（`0x19` とは別物）。実行後はフレームを張り直す。
     ClearMultiTurn,
+    /// 1 軸だけマルチターンカウンタを 0 に戻す。検証用。
+    ClearMultiTurnJoint(usize),
 }
 
 #[derive(Debug, Default)]
@@ -764,7 +766,9 @@ impl BusWorker {
         // 残り 2 軸をクローズドループへ入れてしまわないため。
         let single;
         let joints: &[usize] = match req {
-            BusRequest::EnableJoint(k) | BusRequest::DisableJoint(k) => {
+            BusRequest::EnableJoint(k)
+            | BusRequest::DisableJoint(k)
+            | BusRequest::ClearMultiTurnJoint(k) => {
                 if k >= 3 {
                     log::warn!("{} に軸 {k} はありません", self.leg.prefix());
                     return;
@@ -786,7 +790,9 @@ impl BusWorker {
                 // Zero はフレームの張り直し。1 軸ずつではなく 3 軸まとめて
                 // やる必要があるので、ここでは何もせず下で処理する。
                 BusRequest::Zero => Ok(()),
-                BusRequest::ClearMultiTurn => self.motors[k].clear_multi_turn(&mut self.driver),
+                BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_) => {
+                    self.motors[k].clear_multi_turn(&mut self.driver)
+                }
             };
             if let Err(e) = result {
                 *lock(&self.slot.last_error) = format!("{} 軸{k} {req:?}: {e}", self.leg.prefix());
@@ -798,7 +804,11 @@ impl BusWorker {
                 }
             }
         }
-        if req == BusRequest::Zero || req == BusRequest::ClearMultiTurn {
+        let cleared = matches!(
+            req,
+            BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_)
+        );
+        if req == BusRequest::Zero || cleared {
             // Zero は**モータには何も書かない**。マルチターンフレームとの差を
             // 読み直すだけ。電源を入れ直した後など、フレームがずれた
             // 可能性があるときに使う。
@@ -807,7 +817,7 @@ impl BusWorker {
             // フレームも張り直す必要がある。
             self.frame_ready = false;
             self.slot.anchored.store(false, Ordering::Relaxed);
-            if req == BusRequest::ClearMultiTurn {
+            if cleared {
                 log::warn!(
                     "{} のマルチターンカウンタを 0 に戻しました。\
                      **zero_pose_rad は今の姿勢を基準に測り直すこと**",

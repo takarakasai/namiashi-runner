@@ -423,7 +423,31 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 /// あちらはフラッシュに書くので書き込み回数の上限がある。
 fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
-    println!("マルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。");
+    // `--joint` があれば 1 軸だけ。検証はまずこれで行うこと。
+    let only_joint = match cli.str("joint") {
+        None => None,
+        Some(name) => Some(
+            LEG_JOINT_KINDS
+                .iter()
+                .position(|k| *k == name)
+                .ok_or_else(|| format!("--joint {name:?} が不正です（hip/thigh/calf）"))?,
+        ),
+    };
+    if only_joint.is_some() && only.is_none() {
+        return Err("--joint を使うときは --leg も指定してください".into());
+    }
+    match (only, only_joint) {
+        (Some(l), Some(k)) => println!(
+            "**{} の {} だけ**マルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。",
+            l.prefix(),
+            LEG_JOINT_KINDS[k]
+        ),
+        (Some(l), None) => println!(
+            "**{} の 3 軸**のマルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。",
+            l.prefix()
+        ),
+        _ => println!("**12 軸すべて**のマルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。"),
+    }
     println!("**ROM には書きません。** 次に本当に電源を切れば元どおりです。");
     println!();
     println!("実行後、この姿勢が新しい原点になります。**zero_pose_rad は");
@@ -440,10 +464,11 @@ fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if only.is_some_and(|l| l != leg) {
             continue;
         }
-        array
-            .bus(leg)
-            .request(BusRequest::ClearMultiTurn)
-            .map_err(|e| e.to_string())?;
+        let req = match only_joint {
+            Some(k) => BusRequest::ClearMultiTurnJoint(k),
+            None => BusRequest::ClearMultiTurn,
+        };
+        array.bus(leg).request(req).map_err(|e| e.to_string())?;
     }
     // 各バスが 0x95 を送ってフレームを張り直すまで待つ。
     std::thread::sleep(SETTLE);
