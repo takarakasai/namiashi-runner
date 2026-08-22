@@ -37,6 +37,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut controller = Controller::new(robot, cfg.clone());
     let dt = 1.0 / cfg.control.rate_hz;
     let imu = level_imu();
+    // **実測値の代わりに「伏せ姿勢」を食わせる。**
+    //
+    // 脱力からの遷移は実測値を始点に張るので、ここをゼロにすると
+    // **実機では起こらない軌道**が出る。実際、hip がゼロのまま動かない
+    // ように見えて「hip は動かない」と誤読した (2026-08-22)。
+    //
+    // 伏せ姿勢のモデル角は定義上そのまま `zero_pose_rad`（電源投入時に
+    // モータ角 0 = 伏せ、`q_model = sign * 0 + zero_pose_rad`）。
+    let measured = crouch_pose(cfg);
 
     let mut cmd = OperatorCommand {
         vx_m_s: 0.0,
@@ -44,7 +53,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         wz_rad_s: 0.0,
         height_offset_m: 0.0,
         arm_rad: None,
-        mode: ModeRequest::Stand,
+        // **`Stand` ではない。** CH5 中段は初期姿勢で保持する仕様になったので、
+        // `Stand` のままだとそこで止まって歩容へ進まない。速度は
+        // `State::Active` に入ってから入れるので、最初から `Walk` でよい。
+        mode: ModeRequest::Walk,
         gait,
         play_pose: false,
         chicken_head: false,
@@ -72,7 +84,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             cmd.vy_m_s = vy;
             cmd.wz_rad_s = wz;
         }
-        let out = controller.tick(&cmd, &JointVec::zeros(), &imu, dt);
+        let out = controller.tick(&cmd, &measured, &imu, dt);
         check_limits(cfg, &out.targets, t, &mut violations);
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
@@ -110,6 +122,26 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 }
 
 /// [`crate::runner::open_viz`] と同じ。無効なら `None`。
+/// 電源投入姿勢（伏せ）のモデル角。`zero_pose_rad` そのもの。
+///
+/// `q_model = sign * q_motor + zero_pose_rad` で、電源投入時は
+/// `q_motor = 0`。つまり **`zero_pose_rad` の並びが伏せ姿勢**。
+fn crouch_pose(cfg: &AppConfig) -> JointVec {
+    let mut q = JointVec::zeros();
+    for (slot, leg) in namiashi_hal::joint::LegSlot::ALL
+        .iter()
+        .zip(q.legs.iter_mut())
+    {
+        let Some(bus) = cfg.hardware.bus_for(*slot) else {
+            continue;
+        };
+        for (m, dst) in bus.motors.iter().zip(leg.iter_mut()) {
+            *dst = m.zero_pose_rad;
+        }
+    }
+    q
+}
+
 fn open_viz(cfg: &VizConfig) -> Result<Option<viz::Publisher>, String> {
     if !cfg.enabled {
         return Ok(None);

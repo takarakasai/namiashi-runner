@@ -757,6 +757,32 @@ mod tests {
         );
     }
 
+    /// `--allow-no-sbus`（受信機なしのベンチ）は**初期姿勢で止まる**。
+    ///
+    /// CH5 中段の意味を変えた副作用。以前は立ち姿勢を経て歩容まで行って
+    /// いた。**受信機が無いまま歩容へ入る道を残す理由がない**ので、
+    /// この方が安全側。段階 7-2 の手順もこれに合わせてある。
+    #[test]
+    fn the_bench_command_stops_at_the_start_pose() {
+        use crate::teleop::{Teleop, TeleopConfig};
+        let t = Teleop::new(
+            TeleopConfig::default(),
+            &crate::config::GaitTuning::default(),
+            &namiashi_hal::config::HardwareConfig::default().arm,
+        );
+        let bench = t.bench_stand();
+        assert_eq!(bench.mode, ModeRequest::Stand);
+        let mut c = controller();
+        run_until(&mut c, &bench, State::HoldingStart, 20.0);
+        // 放っておいても歩容へは進まない。
+        for _ in 0..2000 {
+            assert_eq!(
+                c.tick(&bench, &JointVec::zeros(), &imu(), 0.005).state,
+                State::HoldingStart
+            );
+        }
+    }
+
     /// 中段 → 上段で歩容へ、上段 → 中段で初期姿勢へ戻る。
     #[test]
     fn the_switch_walks_from_the_start_pose_and_returns_to_it() {

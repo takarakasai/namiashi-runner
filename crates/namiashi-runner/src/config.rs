@@ -26,6 +26,29 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_toml(text: &str) -> Result<Self, String> {
+        // **`[hardware]` が無いファイルは設定として受け取らない。**
+        //
+        // 全フィールドに serde の既定値が入っているので、**TOML なら何でも
+        // 「設定」として通ってしまう**。実際、モデルの `.misa` を
+        // `--config` に渡すと「設定: OK」と出て、ゼロ点 0 / 符号 +1 の
+        // **未校正の既定値**で実機を動かせてしまった。
+        //
+        // 既定値で走らせたい正規の入口は `--config` を**付けない**こと。
+        // ファイルを指定した以上、その中身が設定であることを確かめる。
+        let raw: toml::Value =
+            toml::from_str(text).map_err(|e| format!("TOML の解析に失敗: {e}"))?;
+        if raw.get("hardware").is_none() {
+            let looks_like_model = raw.get("pose").is_some() || raw.get("joint").is_some();
+            return Err(format!(
+                "設定ファイルに [hardware] がありません{}。\
+                 既定値で走らせたいなら --config を付けないでください",
+                if looks_like_model {
+                    "（`[[pose]]` があります — **モデルファイルを渡していませんか**）"
+                } else {
+                    ""
+                }
+            ));
+        }
         let cfg: AppConfig = toml::from_str(text).map_err(|e| format!("TOML の解析に失敗: {e}"))?;
         cfg.validate()?;
         Ok(cfg)
@@ -259,6 +282,39 @@ impl Default for PoseConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// **モデルファイルを `--config` に渡せてしまってはいけない。**
+    ///
+    /// 全フィールドに serde の既定値があるので、放っておくと TOML なら
+    /// 何でも通る。実際 `.misa` が「設定: OK」と出て、ゼロ点 0 / 符号 +1 の
+    /// **未校正の既定値**で実機を動かせる状態だった (2026-08-22)。
+    #[test]
+    fn a_model_file_is_not_accepted_as_a_config() {
+        let misa = r#"
+[[pose]]
+name = "start"
+
+[pose.angles]
+FL_hip_joint = 0.0
+"#;
+        let e = AppConfig::from_toml(misa).unwrap_err();
+        assert!(e.contains("[hardware]"), "{e}");
+        assert!(e.contains("モデルファイル"), "{e}");
+    }
+
+    #[test]
+    fn an_empty_toml_is_not_accepted_as_a_config() {
+        // ファイルを指定した以上、中身が設定であることを求める。
+        // 既定値で走らせたいなら --config を付けない。
+        assert!(AppConfig::from_toml("").is_err());
+    }
+
+    #[test]
+    fn the_shipped_config_still_loads() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/namiashi.toml");
+        let text = std::fs::read_to_string(path).expect("config/namiashi.toml が読めません");
+        AppConfig::from_toml(&text).expect("同梱の設定が読めなくなっている");
+    }
     use super::*;
 
     #[test]
@@ -273,10 +329,16 @@ mod tests {
         assert_eq!(cfg, back);
     }
 
+    /// 設定ファイルを書かずに起動できること。
+    ///
+    /// **`from_toml("")` ではない。** `--config` を付けない経路は
+    /// `AppConfig::default()` を直接使う（`main::load_config`）ので、
+    /// 空 TOML が通るかどうかとは無関係。かつてこのテストは
+    /// `from_toml("")` を見ており、**「TOML なら何でも設定として通る」
+    /// という穴の方を守っていた**。
     #[test]
-    fn an_empty_file_yields_the_defaults() {
-        // 設定ファイルを書かずに起動できること。
-        assert_eq!(AppConfig::from_toml("").unwrap(), AppConfig::default());
+    fn the_defaults_are_usable_without_a_config_file() {
+        AppConfig::default().validate().unwrap();
     }
 
     #[test]

@@ -47,6 +47,9 @@ fn main() {
 }
 
 fn dispatch(cli: &Cli) -> Result<(), String> {
+    // **知らないフラグは何もしないうちに弾く。** 綴り違いを黙って無視すると
+    // 「指定したつもりの設定が効かないまま実機が動く」になる。
+    cli.validate_flags()?;
     let command = cli.command();
     match command {
         // 設定を読まずに済むものを先に。
@@ -218,12 +221,71 @@ articara で見る:
     );
 }
 
+/// 綴り違いらしき既知フラグを探す。編集距離 1〜2 か、前方一致。
+fn nearest_flag(given: &str) -> Option<&'static str> {
+    BOOL_FLAGS
+        .iter()
+        .chain(VALUE_FLAGS.iter())
+        .filter(|known| {
+            known.starts_with(given)
+                || given.starts_with(**known)
+                || edit_distance(given, known) <= 2
+        })
+        .min_by_key(|known| edit_distance(given, known))
+        .copied()
+}
+
+/// レーベンシュタイン距離。フラグ名しか比べないので素朴な実装で足りる。
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// 素朴なコマンドライン解析。`--key value` と `--key=value`、
 /// [`BOOL_FLAGS`] に載っているものは値を取らない存在フラグ。
 pub struct Cli {
     pub positionals: Vec<String>,
     flags: std::collections::HashMap<String, String>,
 }
+
+/// 値を取るフラグ。**[`BOOL_FLAGS`] と合わせて、これが全部**。
+///
+/// 綴りを間違えたフラグを黙って受け取ると、**指定したつもりの設定が効かない
+/// まま実機が動く**。`--sec 5`（`--secs` の綴り違い）を受け取って既定値で
+/// 走り続ける、といった事故になるので、知らないフラグは起動時に弾く。
+const VALUE_FLAGS: &[&str] = &[
+    "config",
+    "secs",
+    "gait",
+    "vx",
+    "vy",
+    "wz",
+    "every",
+    "out",
+    "leg",
+    "joint",
+    "deg",
+    "speed",
+    "assume",
+    "write",
+    "max-id",
+    "margin",
+    "status",
+    "viz-key",
+    "viz-key-measured",
+    "viz-rate",
+    "viz-endpoint",
+];
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
 const BOOL_FLAGS: &[&str] = &[
@@ -259,6 +321,35 @@ impl Cli {
             }
         }
         Self { flags, positionals }
+    }
+
+    /// 知らないフラグが混ざっていないか。
+    ///
+    /// **綴り違いを黙って無視しない。** `--sec 5` を受け取って既定の
+    /// 秒数で走り続ける、`--vis` で可視化が出ないまま悩む、といった
+    /// 事故を起動時に止める。
+    pub fn validate_flags(&self) -> Result<(), String> {
+        let mut unknown: Vec<&str> = self
+            .flags
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| !BOOL_FLAGS.contains(k) && !VALUE_FLAGS.contains(k))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        unknown.sort_unstable();
+        let hints: Vec<String> = unknown
+            .iter()
+            .map(|k| match nearest_flag(k) {
+                Some(near) => format!("--{k}（もしかして --{near}?）"),
+                None => format!("--{k}"),
+            })
+            .collect();
+        Err(format!(
+            "知らないオプション: {}\n--help で一覧が出ます",
+            hints.join(", ")
+        ))
     }
 
     pub fn command(&self) -> &str {
