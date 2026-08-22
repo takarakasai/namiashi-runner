@@ -196,6 +196,18 @@ fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         "実測: {before:+.4} → {:+.4} rad（Δ {:+.4}）",
         moved.1, moved.0
     );
+    // 指令と実測が食い違ったら符号判定に使わない。クランプは上で弾いているが、
+    // 機械的な干渉や脱調でもここに落ちる。
+    let expected = deg.to_radians().abs();
+    if (moved.0.abs() - expected).abs() > expected * 0.2 && moved.0.abs() >= expected * 0.2 {
+        println!(
+            "⚠ 指令 {:+.2}° に対し実測 {:+.2}°。**符号の判定には使えません。**\n\
+             　可動域の端・機械的な干渉・脱調を確認してください",
+            deg,
+            moved.0.to_degrees()
+        );
+        return Ok(());
+    }
     if moved.0.abs() < deg.to_radians() * 0.2 {
         println!(
             "⚠ ほとんど動いていません。モータ電源・可動域の端・機械的な干渉を確認してください"
@@ -249,6 +261,28 @@ fn jog_once(
     // （実測で 73° 動く条件があった）。可動域クランプは ±145° なので止まらない。
     let map = &cfg.hardware.legs.bus[bus_index(&cfg.hardware, bus.leg())?].motors[k];
     let target = before + map.sign * delta_rad;
+
+    // **クランプに当たる状態では測らない。**
+    //
+    // 目標は可動域へクランプされるので、端の外や端の近くにいると「5° 動かす」
+    // つもりが端まで一気に動く。実測 (2026-08-22): RL hip が可動域の外
+    // (-75.9°, min は -60°) にいたため、5° の指令が **15.9° の移動**になった。
+    // しかも「+ 方向へ動いたか」への答えはクランプの結果であって符号の証拠に
+    // ならないのに、そのまま sign として採用されてしまった。
+    let clamped = target.clamp(map.min_rad, map.max_rad);
+    if (clamped - target).abs() > 1e-9 {
+        return Err(format!(
+            "現在位置 {:+.4} rad ({:+.1}°) から {:+.1}° 動かすと可動域              [{:+.1}, {:+.1}]° を出るため、指令が端へクランプされます。
+             このまま実行すると **{:+.1}° 動いて**しまい、符号の判定にも使えません。
+             可動域の内側へ手で戻してからやり直してください。",
+            before,
+            before.to_degrees(),
+            (map.sign * delta_rad).to_degrees(),
+            map.min_rad.to_degrees(),
+            map.max_rad.to_degrees(),
+            (clamped - before).to_degrees(),
+        ));
+    }
 
     let mut cmds = [JointCommand::default(); 3];
     cmds[k] = JointCommand {
