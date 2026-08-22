@@ -108,6 +108,8 @@ pub struct Controller {
     tilt_rad: [f64; 2],
     /// 姿勢が可動域に届かないことを 1 度だけ警告するためのフラグ。
     warned_tilt_reach: bool,
+    /// ポーズ再生を要求した瞬間に CH8 が入っていたか（振る足の選択）。
+    alt_pose_requested: bool,
     /// 停止指令を受けてから全脚接地を待っている時間 [s]。
     /// 待ちが終わらないまま歩き続けないための保険。
     settling_s: f64,
@@ -148,6 +150,7 @@ impl Controller {
             settling_s: 0.0,
             tilt_rad: [0.0; 2],
             warned_tilt_reach: false,
+            alt_pose_requested: false,
             body_view: BodyView::default(),
         }
     }
@@ -359,6 +362,8 @@ impl Controller {
 
     fn tick_active(&mut self, cmd: &OperatorCommand, imu: &ImuSample, dt: f64) {
         if cmd.play_pose {
+            // 押した瞬間の CH8 で決める。再生中に CH8 を動かしても切り替わらない。
+            self.alt_pose_requested = cmd.chicken_head;
             self.start_pose_playback();
             return;
         }
@@ -483,7 +488,14 @@ impl Controller {
     }
 
     fn start_pose_playback(&mut self) {
-        let name = self.cfg.poses.greeting.clone();
+        // **CH8 を押しながらだと別のものを再生する。** 空きチャンネルが無いので
+        // 姿勢モードのスイッチを修飾キーとして使う。`greeting_alt` が空なら
+        // 従来どおり `greeting` だけ。
+        let name = if self.alt_pose_requested && !self.cfg.poses.greeting_alt.is_empty() {
+            self.cfg.poses.greeting_alt.clone()
+        } else {
+            self.cfg.poses.greeting.clone()
+        };
         match PosePlayer::start(&self.robot.poses, &name, self.targets) {
             Ok(player) => {
                 log::info!("ポーズ {name:?} を再生します");

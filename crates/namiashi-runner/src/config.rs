@@ -302,6 +302,12 @@ pub struct PoseConfig {
     /// `[[sequence]]` 名、または `[[pose]]` 名。
     #[serde(default = "default_greeting")]
     pub greeting: String,
+    /// **CH8 を押しながら CH7** で再生するもの。空なら [`Self::greeting`]。
+    ///
+    /// 振る足を現場で選べるようにするためのもの。空きチャンネルが無いので、
+    /// 既にある CH8（姿勢モード）を修飾キーとして使う。
+    #[serde(default = "default_greeting_alt")]
+    pub greeting_alt: String,
     /// チキンヘッドの基準角 (rad)。胴体ピッチ 0 のときの腕角。
     #[serde(default)]
     pub chicken_head_base_rad: f64,
@@ -316,6 +322,10 @@ pub struct PoseConfig {
 fn default_greeting() -> String {
     "greeting".into()
 }
+
+fn default_greeting_alt() -> String {
+    String::new()
+}
 fn default_chicken_gain() -> f64 {
     1.0
 }
@@ -327,6 +337,7 @@ impl Default for PoseConfig {
     fn default() -> Self {
         Self {
             greeting: default_greeting(),
+            greeting_alt: default_greeting_alt(),
             chicken_head_base_rad: 0.0,
             chicken_head_gain: default_chicken_gain(),
             chicken_head_tau_s: default_chicken_tau(),

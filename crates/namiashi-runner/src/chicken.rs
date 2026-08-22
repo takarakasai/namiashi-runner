@@ -71,6 +71,7 @@ mod tests {
     fn cfg(tau: f64, gain: f64, base: f64) -> PoseConfig {
         PoseConfig {
             greeting: "greeting".into(),
+            greeting_alt: String::new(),
             chicken_head_base_rad: base,
             chicken_head_gain: gain,
             chicken_head_tau_s: tau,

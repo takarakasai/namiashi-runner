@@ -89,7 +89,8 @@ deadband = 0.0
 expo = 0.0
 
 [poses]
-greeting = "greeting"
+greeting = "wave_fr"
+greeting_alt = "wave_fl"
 chicken_head_base_rad = 0.0
 chicken_head_gain = 1.0
 chicken_head_tau_s = 0.05
