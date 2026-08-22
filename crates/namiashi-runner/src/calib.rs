@@ -345,7 +345,10 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         min = min.min(s.position_rad);
         max = max.max(s.position_rad);
         if forever {
-            print!("\r  min {min:+.4}  max {max:+.4}  （幅 {:+.4} rad）", max - min);
+            print!(
+                "\r  min {min:+.4}  max {max:+.4}  （幅 {:+.4} rad）",
+                max - min
+            );
         } else {
             print!(
                 "\r  min {min:+.4}  max {max:+.4}  （残り {:>4.1} s）",
@@ -448,7 +451,11 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 format!("{v:+.4}")
             })
             .collect();
-        println!("  {} zero_pose_rad = [{}] rad", leg.prefix(), vals.join(" "));
+        println!(
+            "  {} zero_pose_rad = [{}] rad",
+            leg.prefix(),
+            vals.join(" ")
+        );
     }
     match cli.str("write") {
         Some(path) => {
@@ -495,7 +502,9 @@ fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             "**{} の 3 軸**のマルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。",
             l.prefix()
         ),
-        _ => println!("**12 軸すべて**のマルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。"),
+        _ => println!(
+            "**12 軸すべて**のマルチターンカウンタを 0 に戻します（モータ電源 OFF/ON 相当）。"
+        ),
     }
     println!("**ROM には書きません。** 次に本当に電源を切れば元どおりです。");
     println!();
@@ -533,7 +542,10 @@ fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             continue;
         }
         let st = array.bus(leg).state();
-        let q: Vec<String> = st.iter().map(|s| format!("{:+.4}", s.position_rad)).collect();
+        let q: Vec<String> = st
+            .iter()
+            .map(|s| format!("{:+.4}", s.position_rad))
+            .collect();
         println!("  {} q(model) = [{}] rad", leg.prefix(), q.join(" "));
     }
     Ok(())

@@ -404,7 +404,10 @@ impl LegBus {
         for m in &bus_cfg.motors {
             let id = MotorId::new(m.id)
                 .ok_or_else(|| Error::Config(format!("モータ id {} は範囲外です", m.id)))?;
-            motors.push(Motor::new(id, motor_cfg_for(m.gear_ratio_or(legs.gear_ratio))));
+            motors.push(Motor::new(
+                id,
+                motor_cfg_for(m.gear_ratio_or(legs.gear_ratio)),
+            ));
             maps.push(JointMap::new(m));
         }
         let motors: [Motor; 3] = motors
@@ -608,7 +611,7 @@ impl BusWorker {
     /// いる限りマルチターン角を保持しているので、そちらを基準にすればよい。
     fn establish_frame(&mut self) -> bool {
         let mut offsets = [0.0f64; 3];
-        for k in 0..3 {
+        for (k, offset) in offsets.iter_mut().enumerate() {
             let abs = match self.motors[k].read_absolute_angle(&mut self.driver) {
                 Ok(v) => v as f64,
                 Err(e) => {
@@ -626,7 +629,7 @@ impl BusWorker {
                     return false;
                 }
             };
-            offsets[k] = abs - rel;
+            *offset = abs - rel;
         }
         self.frame_offset = offsets;
         self.frame_ready = true;

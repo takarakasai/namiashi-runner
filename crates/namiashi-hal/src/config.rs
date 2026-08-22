@@ -196,7 +196,7 @@ pub const CALF_PULLEY_TEETH: (f64, f64) = (28.0, 18.0);
 pub const HIP_WIDE_RAD: f64 = 1.0471975511965976;
 
 /// hip の可動域の狭いほう (rad) = 45°。
-pub const HIP_NARROW_RAD: f64 = 0.7853981633974483;
+pub const HIP_NARROW_RAD: f64 = std::f64::consts::FRAC_PI_4;
 
 /// thigh の可動域 (rad)。±145°、4 軸とも共通。実機で確認済み。
 pub const THIGH_LIMIT_RAD: f64 = 2.5307274153917776;

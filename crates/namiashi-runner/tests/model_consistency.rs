@@ -46,7 +46,8 @@ fn load(rel: &str) -> toml::Value {
             path.display()
         )
     });
-    toml::from_str(&text).unwrap_or_else(|e| panic!("{} の TOML が壊れています: {e}", path.display()))
+    toml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} の TOML が壊れています: {e}", path.display()))
 }
 
 /// `[[[名前]]]` の配列を名前で引ける形にする。順序は別途 [`names`] で見る。
@@ -111,7 +112,10 @@ fn poses_agree_between_misa_and_sidecar() {
         let (ka, kb) = (angles(pa), angles(pb));
         let joints: std::collections::BTreeSet<_> = ka.keys().chain(kb.keys()).collect();
         for j in joints {
-            let (va, vb) = (ka.get(j).copied().unwrap_or(0.0), kb.get(j).copied().unwrap_or(0.0));
+            let (va, vb) = (
+                ka.get(j).copied().unwrap_or(0.0),
+                kb.get(j).copied().unwrap_or(0.0),
+            );
             assert!(
                 (va - vb).abs() <= ANGLE_TOL,
                 "pose '{name}' の {j} がずれています: .misa={va} サイドカー={vb} \
