@@ -103,6 +103,20 @@ impl JointStatus {
     }
 }
 
+/// ドライバの PID ゲイン（`0x30`）。各ループの Kp・Ki。
+///
+/// **`Kd` は無い。** この基板が応答する旧インタフェースは Kp/Ki だけを
+/// 返す（documented な `0xC0` は Kd も持つが、この基板は応答しない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct JointPids {
+    pub position_kp: u8,
+    pub position_ki: u8,
+    pub speed_kp: u8,
+    pub speed_ki: u8,
+    pub current_kp: u8,
+    pub current_ki: u8,
+}
+
 /// バススレッドへの制御要求。周期指令とは別経路にしてある。
 ///
 /// 位置指令は「最新の 1 個だけが意味を持つ」ので共有スロットで上書きするが、
@@ -151,6 +165,17 @@ pub enum BusRequest {
     /// returned to normal」と明記している。低電圧保護ならバス電圧を戻して
     /// から投げること。結果は [`LegBus::status`] を読み直して確かめる。
     ClearError,
+    /// ドライバの PID ゲインを 3 軸ぶん読む（`0x30`）。**読むだけ。**
+    ///
+    /// 位置ループ / 速度ループ / 電流ループの Kp・Ki（各 u8）。
+    /// コンプライアンスを効かせたいとき、まず現状を知るために使う。
+    ///
+    /// **`0x30` は RS485 マニュアルに記載が無い。** documented な `0xC0` に
+    /// この基板が応答しない一方、`0x30` には応答する実績がある
+    /// （`motor_map.md`）。書き込み側は未実装。
+    ///
+    /// 結果は [`LegBus::pids`] で取る。
+    ReadPid,
     /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
     ///
     /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
@@ -175,6 +200,8 @@ struct BusSlot {
     /// 直近の [`BusRequest::ReadSingleTurn`] の結果（0.01°/LSB, 0..=35999）。
     /// 読めなかった軸は `None`。
     single_turn: Mutex<[Option<u32>; 3]>,
+    /// 直近の [`BusRequest::ReadPid`] の結果。読めなかった軸は `None`。
+    pids: Mutex<[Option<JointPids>; 3]>,
 }
 
 /// 1 本の脚バスへのハンドル。
@@ -211,6 +238,11 @@ impl LegBus {
     /// （0.01°/LSB, 0..=35999）。まだ読んでいない・読めなかった軸は `None`。
     pub fn single_turn(&self) -> [Option<u32>; 3] {
         *lock(&self.slot.single_turn)
+    }
+
+    /// 直近の [`BusRequest::ReadPid`] で読んだゲイン。
+    pub fn pids(&self) -> [Option<JointPids>; 3] {
+        *lock(&self.slot.pids)
     }
 
     pub fn stats(&self) -> BusStats {
@@ -910,6 +942,24 @@ impl BusWorker {
                                 valid: true,
                             };
                         })
+                }
+                BusRequest::ReadPid => {
+                    lock(&self.slot.pids)[k] = None;
+                    let id = self.motors[k].id();
+                    <Rs485Driver as lkmotor_driver::LkCommands>::read_legacy_pids(
+                        &mut self.driver,
+                        id,
+                    )
+                    .map(|p| {
+                        lock(&self.slot.pids)[k] = Some(JointPids {
+                            position_kp: p.position_kp,
+                            position_ki: p.position_ki,
+                            speed_kp: p.speed_kp,
+                            speed_ki: p.speed_ki,
+                            current_kp: p.current_kp,
+                            current_ki: p.current_ki,
+                        });
+                    })
                 }
                 // 失敗した軸に古い値を残さないよう、読む前に落とす。
                 BusRequest::ReadSingleTurn => {

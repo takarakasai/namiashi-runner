@@ -43,9 +43,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("single-turn") => single_turn(cfg, cli),
         Some("clear-error") => clear_error(cfg, cli),
         Some("restart") => restart(cfg, cli),
+        Some("pid") => pid(cfg, cli),
         Some(other) => Err(format!(
             "未知の calib サブコマンド {other:?}\
-             （scan|move|range|zero|clear-multiturn|single-turn|clear-error|restart）"
+             （scan|move|range|zero|clear-multiturn|single-turn|clear-error|restart|pid）"
         )),
         None => Err(
             "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
@@ -983,5 +984,89 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     }
     println!();
     println!("**Δq が 0 でないなら原点が動いています。zero_pose_rad は測り直しです。**");
+    Ok(())
+}
+
+/// `calib pid` — ドライバの PID ゲインを読む（`0x30`）。**読むだけ。**
+///
+/// # 何のために要るのか
+///
+/// 位置制御のゲインが高いと動きがピーキーになる。コンプライアンスを
+/// 効かせたいとき、**まず現状の値を知らないと下げ幅を決められない。**
+///
+/// # 未文書のコマンドである
+///
+/// `0x30` は RS485 マニュアルに記載が無い。documented なのは `0xC0`
+/// （§18/19、Kp/Ki/Kd を u16 で持つ）だが、**この基板は `0xC0` に応答せず
+/// `0x30` には応答する**（`motor_map.md`）。旧インタフェースなので
+/// Kp と Ki しか返らず、Kd は無い。
+///
+/// **書き込みは実装していない。** `0x31`（RAM）/ `0x32`（ROM）も未文書で、
+/// ペイロードの形が確かめられていない。`0x95` で同じことをやって
+/// マルチターンカウンタを 2 回壊した実績があるので、読めた値の形を
+/// 確認してから足す。
+fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let only = leg_filter(cli)?;
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        array
+            .bus(leg)
+            .request(BusRequest::ReadPid)
+            .map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(SETTLE);
+
+    println!("PID ゲイン 0x30（**読むだけ。何も書きません**）");
+    println!();
+    println!(
+        "{:<4} {:<6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "脚", "軸", "位置Kp", "位置Ki", "速度Kp", "速度Ki", "電流Kp", "電流Ki"
+    );
+    let mut missing = Vec::new();
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        for (k, p) in array.bus(leg).pids().iter().enumerate() {
+            match p {
+                Some(p) => println!(
+                    "{:<4} {:<6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                    leg.prefix(),
+                    LEG_JOINT_KINDS[k],
+                    p.position_kp,
+                    p.position_ki,
+                    p.speed_kp,
+                    p.speed_ki,
+                    p.current_kp,
+                    p.current_ki
+                ),
+                None => {
+                    println!(
+                        "{:<4} {:<6} {:>8}",
+                        leg.prefix(),
+                        LEG_JOINT_KINDS[k],
+                        "**読めず**"
+                    );
+                    missing.push(format!("{} {}", leg.prefix(), LEG_JOINT_KINDS[k]));
+                }
+            }
+        }
+    }
+    println!();
+    if missing.is_empty() {
+        println!("**書き込みは未実装。** `0x31`(RAM) / `0x32`(ROM) も未文書なので、");
+        println!("ペイロードの形を確かめてから足します。");
+        println!("コンプライアンスを上げるなら**位置 Kp を下げる**のが第一手です。");
+    } else {
+        println!("**読めなかった軸: {}**", missing.join(", "));
+        println!("この基板が `0x30` に応答しない可能性があります。");
+    }
     Ok(())
 }
