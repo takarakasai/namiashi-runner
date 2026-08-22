@@ -115,7 +115,7 @@ max_rad = 0.7853981633974483
 kind = "thigh"
 id = 2
 sign = 1.0
-zero_pose_rad = 1.1693705988362009
+zero_pose_rad = 1.1938705988362008
 min_rad = -2.530727415391778
 max_rad = 2.530727415391778
 
@@ -146,7 +146,7 @@ max_rad = 1.0471975511965976
 kind = "thigh"
 id = 2
 sign = -1.0
-zero_pose_rad = 1.264520598836201
+zero_pose_rad = 1.192870598836201
 min_rad = -2.530727415391778
 max_rad = 2.530727415391778
 
@@ -177,7 +177,7 @@ max_rad = 0.7853981633974483
 kind = "thigh"
 id = 2
 sign = 1.0
-zero_pose_rad = 0.9301669256310974
+zero_pose_rad = 1.1308669256310975
 min_rad = -2.530727415391778
 max_rad = 2.530727415391778
 
@@ -208,7 +208,7 @@ max_rad = 1.0471975511965976
 kind = "thigh"
 id = 2
 sign = -1.0
-zero_pose_rad = 0.8301669256310975
+zero_pose_rad = 1.1154669256310974
 min_rad = -2.530727415391778
 max_rad = 2.530727415391778
 
