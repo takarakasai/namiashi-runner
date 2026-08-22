@@ -1087,7 +1087,9 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         println!("電源を切れば元に戻ります。ROM には書きません。");
         println!("**指定していない項は現状値を保ちます**（読んでから書きます）。");
         println!();
-        println!("**`0x30` 系にしか応答しない個体には書けません**（未対応）。");
+        println!("**旧世代（0x30）のドライバはトルク上限を書けないようです。**");
+        println!("2 / 4 / 6 バイトいずれの `0x38` でも値が変わりませんでした。");
+        println!("書けなかった軸は警告を出します（黙って成功扱いにしません）。");
         println!("続けるなら Enter、やめるなら Ctrl-C");
         let _ = read_line();
     }
@@ -1192,7 +1194,8 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         println!("`--set-torque-limit` は押し返す力そのものを頭打ちにする別の手。");
         println!();
         println!("**旧インタフェース（0x30）の個体には Kd を書けません。**");
-        println!("値が Kp/Ki の 6 個しかなく、Kd の枠が無いためです。");
+        println!("値が Kp/Ki の 6 個しかなく、Kd の枠が無いためです（V2.3 仕様書）。");
+        println!("**トルク上限も書けません。** Kp/Ki だけが 12 軸そろいます。");
     } else {
         println!("**読めなかった軸: {}**", missing.join(", "));
         println!("`0x30`（未文書）と `0xC0`（マニュアル §18）の両方を試して");

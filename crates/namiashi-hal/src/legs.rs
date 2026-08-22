@@ -272,11 +272,31 @@ fn write_pids(driver: &mut Rs485Driver, id: MotorId, set: PidSet) -> lkmotor_dri
         // そちらには `0x38` がある。トルク上限は関節を back-drivable に
         // する実効的なレバーなので、**12 軸そろえられるかどうかがここで
         // 決まる**。
-        if driver
+        let documented_ok = driver
             .write_control_i16_ram(id, ControlParamId::TorqueLimit, v)
-            .is_err()
-        {
+            .is_ok();
+        if !documented_ok {
             driver.write_max_torque_ram(id, v)?;
+        }
+        // **書けたと言い張らない。読み直して確かめる。**
+        //
+        // `0x38` は応答を返すのに値が変わらないことがある（実機で確認、
+        // 2026-08-22）。エラーにならないので、確認しないと「成功した」と
+        // 表示され続ける。今日この形のバグを 3 回踏んだ。
+        let got = match driver.read_control_param(id, ControlParamId::TorqueLimit) {
+            Ok(ControlParamValue::TorqueLimit(x)) => Some(x),
+            _ => driver.read_max_torque(id).ok(),
+        };
+        if got != Some(v) {
+            log::warn!(
+                "モータ {} のトルク上限が **{} のまま**です（{v} を書いたつもり）。\
+                 このドライバはトルク上限の書き込みに対応していないとみられます",
+                id.get(),
+                match got {
+                    Some(x) => x.to_string(),
+                    None => "不明".into(),
+                }
+            );
         }
     }
     Ok(())
