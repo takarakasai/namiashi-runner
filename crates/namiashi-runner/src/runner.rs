@@ -149,6 +149,33 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         .map_err(|e| format!("{e}（12 軸すべてが応答している必要があります）"))?;
     log::info!("12 軸の初回読み出しを確認しました");
 
+    // **CH5 が「脱力」でなければ起動しない。**
+    //
+    // モードスイッチは毎周期そのまま指令になるので、起立や歩行の位置で
+    // 起動すると**何の操作もなしにその場で立ち上がる**。立ち上げ手順は
+    // 「CH5 が脱力位置で起動する」ことを最初の確認項目にしているが、
+    // 人手のチェックリストだけに任せる話ではない。
+    //
+    // `--allow-no-sbus` のときは見ない。受信が無い＝フェイルセーフ＝起立が
+    // その指定の意味そのもので、そこで止めても意味がない。
+    if !opts.allow_no_sbus {
+        let sbus = hw.sbus.state();
+        if cfg.teleop.mode.position(&sbus) != 0 {
+            return Err(format!(
+                "CH5（モード）が脱力位置にありません（いま {} 段目 / raw {}）。                 **脱力に戻してから起動してください。** このまま起動すると                 操作なしで立ち上がります",
+                cfg.teleop.mode.position(&sbus),
+                cfg.teleop
+                    .mode
+                    .channel
+                    .checked_sub(1)
+                    .and_then(|i| sbus.channels.get(i))
+                    .copied()
+                    .unwrap_or(0),
+            ));
+        }
+        log::info!("CH5 は脱力位置です");
+    }
+
     let stop = install_signal_handler();
     let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
     let teleop_timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
