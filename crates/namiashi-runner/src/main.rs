@@ -41,8 +41,19 @@ fn main() {
     }
 
     if let Err(e) = dispatch(&cli) {
-        eprintln!("エラー: {e}");
-        std::process::exit(1);
+        // **起動条件が整っていないだけの失敗は 75 で返す。**
+        // systemd はこれだけを再起動の対象にする（`namiashi.service`）。
+        // 制御ループ中のクラッシュ（1）で自動再起動すると脚が再び動き出す。
+        match e.strip_prefix(runner::RETRYABLE) {
+            Some(msg) => {
+                eprintln!("待機: {msg}");
+                std::process::exit(75);
+            }
+            None => {
+                eprintln!("エラー: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 

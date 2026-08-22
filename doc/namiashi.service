@@ -4,11 +4,23 @@
 #   sudo cp ~/work/namiashi-runner/doc/namiashi.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl start namiashi        # 手動起動で試す
+#   journalctl -u namiashi -f            # ログを見る
 #
 # 電源投入で自動起動させるのは、手動起動で挙動を確認してから:
 #   sudo systemctl enable namiashi
 #
+# 停止は必ず systemctl で（SIGTERM が脱力シーケンスに入る）:
+#   sudo systemctl stop namiashi
+#
 # 設計の根拠は doc/runtime_tuning.md 「RT 優先度の付与」を参照。
+#
+# --- 本番の投入手順（順番が重要） ---
+#   1. ロボットを**伏せ姿勢**にしてからモータ電源を入れる。
+#      これを守らないと 12 軸の zero_pose_rad が全て無効になる。
+#   2. プロポの電源を入れ、CH5 を**脱力**位置にする。
+#   3. SBC の電源を入れる（enable 済みなら自動起動）。
+#      2 が済んでいなくても、済ませた時点で自動的に立ち上がる（下記 Restart= 参照）。
+#   4. `journalctl -u namiashi -f` で「制御ループ開始」を確認してから CH5 を動かす。
 
 [Unit]
 Description=namiashi quadruped control loop
@@ -22,9 +34,15 @@ BindsTo=dev-ttyCH9344USB0.device
 # ネットワークには依存しない。本番の操縦は S.BUS(UART6) 経由のプロポ。
 After=basic.target
 
-# 再起動の暴走を防ぐ（Restart= を有効にした場合に効く）
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# 起動レート制限は無効にする。
+#
+# 一見危険だが、下の Restart=/RestartPreventExitStatus= により**再起動されるのは
+# 終了コード 75（起動条件待ち）だけ**で、クラッシュは一度も再起動されない。
+# つまりここで防ぐべき「クラッシュループ」は構造的に起こり得ない。
+#
+# 逆に制限を残すと、プロポの電源を入れるのが 5 回×3 秒 = 15 秒より遅れただけで
+# ユニットが failed のまま固まる。本番でこれをやると原因が分からず詰む。
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -45,17 +63,32 @@ CPUSchedulingPriority=50
 LimitRTPRIO=95
 LimitMEMLOCK=infinity
 
-# --- 自動再起動: 安全に関わる判断が必要 ---
+# --- 自動再起動: 「起動条件待ち」だけを再試行する ---
 #
-# Restart=on-failure にすると、制御プロセスが落ちても自動復帰する。
-# 一方で「異常終了 → 再起動 → 脚が再び動き出す」という挙動になる。
-# namiashi は受信断・フェイルセーフで速度 0・その場起立に入る設計だが、
-# 落ちた原因によっては安全側に倒れるとは限らない。
+# 異常終了には性質の違う 2 種類がある。
 #
-# 既定は Restart=no（手動復帰）。現場運用で自動復帰が必要と判断したら
-# on-failure に変更すること。
-Restart=no
-RestartSec=2
+#   終了コード 75 … S.BUS が来ていない / CH5 が脱力位置にない。
+#                    まだ何も動かしていない段階の**正常な待ち**で、プロポの
+#                    電源を入れれば解消する。再試行するのが正しい。
+#   それ以外      … 制御ループまで到達した上での失敗。ここで自動再起動すると
+#                    **脚が再び動き出す**。原因が分からないまま動かすのは危険で、
+#                    人が見に行くべき。
+#
+# 一律 on-failure だと後者まで拾い、一律 no だと本番で「プロポを後から入れたのに
+# 立ち上がらない」になる。そこで runner が 75 を返し分け、ここで 75 以外を弾く。
+# 詳細は crates/namiashi-runner/src/runner.rs の RETRYABLE を参照。
+Restart=on-failure
+RestartSec=3
+
+# 75 以外では再起動しない。1 は通常のエラー、101 は Rust の panic、
+# 残りはクラッシュ由来のシグナル。
+RestartPreventExitStatus=1 101 SIGSEGV SIGABRT SIGBUS SIGILL SIGFPE SIGSYS
+
+# SIGTERM は脱力シーケンスに入る（runner.rs の SHUTDOWN フラグ）。
+# 実測の終了時間は約 3.2 秒なので 15 秒あれば足りる。
+# 落ちなければ SIGKILL になり、モータは最後の指令を保持したままになる。
+KillSignal=SIGTERM
+TimeoutStopSec=15
 
 [Install]
 # 注意: これは「電源投入 → S.BUS 応答」を 1.6 秒遅らせる設定である。

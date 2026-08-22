@@ -70,6 +70,23 @@ impl Hardware {
     }
 }
 
+/// 「まだ起動条件が整っていない」失敗に付ける前置き。
+///
+/// systemd に**再試行してよい失敗**を伝えるためのもの。`main` がこれを見て
+/// 終了コード 75 を返し、ユニット側は 75 のときだけ再起動する。
+///
+/// # なぜ区別するのか
+///
+/// 起動条件（S.BUS の受信、CH5 が脱力位置）が整わないのは**正常な待ち**で、
+/// プロポの電源を入れれば解消する。一方、制御ループ中のクラッシュを自動で
+/// 再起動すると**脚が再び動き出す**。同じ異常終了でも、片方は再試行が正しく、
+/// もう片方は人が見に行くべき。
+///
+/// 一律 `Restart=on-failure` にすると後者まで拾い、一律 `Restart=no` にすると
+/// 本番で「プロポを後から入れたのに立ち上がらない」になる。
+pub const RETRYABLE: &str = "[retryable] ";
+
+
 /// 追従誤差と可動域逸脱の監視。**検出して言うだけで、何もしない。**
 ///
 /// # 何のために要るのか
@@ -211,7 +228,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         }
         Err(e) => {
             return Err(format!(
-                "{e}。送信機の電源とポートを確認してください（ベンチで脚を浮かせて \
+                "{RETRYABLE}{e}。送信機の電源とポートを確認してください（ベンチで脚を浮かせて \
                  いるなら --allow-no-sbus）"
             ))
         }
@@ -264,7 +281,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         let sbus = hw.sbus.state();
         if cfg.teleop.mode.position(&sbus) != 0 {
             return Err(format!(
-                "CH5（モード）が脱力位置にありません（いま {} 段目 / raw {}）。                 **脱力に戻してから起動してください。** このまま起動すると                 操作なしで立ち上がります",
+                "{RETRYABLE}CH5（モード）が脱力位置にありません（いま {} 段目 / raw {}）。                 **脱力に戻してから起動してください。** このまま起動すると                 操作なしで立ち上がります",
                 cfg.teleop.mode.position(&sbus),
                 cfg.teleop
                     .mode
