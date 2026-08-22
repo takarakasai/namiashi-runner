@@ -198,6 +198,9 @@ pub const HIP_WIDE_RAD: f64 = 1.0471975511965976;
 /// hip の可動域の狭いほう (rad) = 45°。
 pub const HIP_NARROW_RAD: f64 = 0.7853981633974483;
 
+/// thigh の可動域 (rad)。±145°、4 軸とも共通。実機で確認済み。
+pub const THIGH_LIMIT_RAD: f64 = 2.5307274153917776;
+
 /// calf の可動域 (rad)。±154.52338°、2026-08-21 の設計変更後の値。
 ///
 /// thigh の ±2.62 rad (±150.11°) とは違うので、まとめて扱わないこと。
@@ -448,7 +451,11 @@ impl Default for HardwareConfig {
                 LegSlot::Fr | LegSlot::Rr => (-HIP_NARROW_RAD, HIP_WIDE_RAD),
             };
             // calf だけ可動域が違う。2026-08-21 の設計変更で ±154.52338°。
-            [hip, (-2.62, 2.62), (-CALF_LIMIT_RAD, CALF_LIMIT_RAD)]
+            [
+                hip,
+                (-THIGH_LIMIT_RAD, THIGH_LIMIT_RAD),
+                (-CALF_LIMIT_RAD, CALF_LIMIT_RAD),
+            ]
         };
         // 符号は設計データ由来で、実機で確認済み（2026-08-21）。
         //

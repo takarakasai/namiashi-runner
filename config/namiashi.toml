@@ -116,8 +116,8 @@ kind = "thigh"
 id = 2
 sign = 1.0
 zero_pose_rad = 1.1693705988362009
-min_rad = -2.62
-max_rad = 2.62
+min_rad = -2.530727415391778
+max_rad = 2.530727415391778
 
 [[hardware.legs.bus.motors]]
 kind = "calf"
@@ -146,9 +146,9 @@ max_rad = 1.0471975511965976
 kind = "thigh"
 id = 2
 sign = -1.0
-zero_pose_rad = 1.1693705988362009
-min_rad = -2.62
-max_rad = 2.62
+zero_pose_rad = 1.264520598836201
+min_rad = -2.530727415391778
+max_rad = 2.530727415391778
 
 [[hardware.legs.bus.motors]]
 kind = "calf"
@@ -178,8 +178,8 @@ kind = "thigh"
 id = 2
 sign = 1.0
 zero_pose_rad = 0.9301669256310974
-min_rad = -2.62
-max_rad = 2.62
+min_rad = -2.530727415391778
+max_rad = 2.530727415391778
 
 [[hardware.legs.bus.motors]]
 kind = "calf"
@@ -209,8 +209,8 @@ kind = "thigh"
 id = 2
 sign = -1.0
 zero_pose_rad = 0.8301669256310975
-min_rad = -2.62
-max_rad = 2.62
+min_rad = -2.530727415391778
+max_rad = 2.530727415391778
 
 [[hardware.legs.bus.motors]]
 kind = "calf"
