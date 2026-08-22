@@ -1113,14 +1113,43 @@ mod tests {
             tilted.max_abs_diff(&flat) > 0.02,
             "ロールを入れても関節が動いていない"
         );
-        // **左右で逆向きに動く。** ロールなので当然だが、これが揃って
-        // いたら回転ではなく平行移動になっている。
-        let dl = tilted.legs[0][0] - flat.legs[0][0]; // FL hip
-        let dr = tilted.legs[1][0] - flat.legs[1][0]; // FR hip
+        // **+roll と −roll は鏡像になる。** これが回転であることの確認。
+        //
+        // 「左右の hip が逆向きに動く」は**成り立たない**。足は胴体中心より
+        // 下にあるので、胴体を回すと胴体座標系の足は全脚とも同じ向きへ
+        // `−h·sin θ` 振れる。左右差は足の横オフセットぶんしか出ない。
+        // 検算: h = 0.2, θ = 0.15 → Δy = −0.0299 m、hip ≈ atan(0.0299/0.2)
+        // = 0.148 rad。
+        let mut minus = roll;
+        minus.body_attitude_rad = [-0.15, 0.0];
+        let mut mirrored = flat;
+        for _ in 0..200 {
+            mirrored = c.tick(&minus, &JointVec::zeros(), &imu(), dt).targets;
+        }
+        for l in 0..4 {
+            let up = tilted.legs[l][0] - flat.legs[l][0];
+            let down = mirrored.legs[l][0] - flat.legs[l][0];
+            assert!(
+                up * down < 0.0,
+                "脚 {l} の hip が ±roll で同じ向きに動いた: {up:+.4} {down:+.4}"
+            );
+            assert!(
+                (up + down).abs() < 0.02,
+                "脚 {l} の hip が ±roll で鏡像になっていない: {up:+.4} {down:+.4}"
+            );
+        }
+        // 大きさも幾何と合っているか（h·sin θ / h の atan）。
+        let want = (0.2f64 * 0.15f64.sin() / 0.2).atan();
+        let got = (tilted.legs[0][0] - flat.legs[0][0]).abs();
         assert!(
-            dl * dr < 0.0 || dl.abs() + dr.abs() > 0.02,
-            "左右の hip が同じ向きに動いた（ロールになっていない）: {dl:+.4} {dr:+.4}"
+            (got - want).abs() < 0.03,
+            "hip の変化 {got:+.4} が幾何の予測 {want:+.4} と合わない"
         );
+
+        // 戻す前に元姿勢へ。
+        for _ in 0..200 {
+            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+        }
 
         // 戻せば元の姿勢へ。
         for _ in 0..200 {

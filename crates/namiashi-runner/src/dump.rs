@@ -66,7 +66,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         mode: ModeRequest::Walk,
         gait,
         play_pose: false,
-        chicken_head: tilt != [0.0; 2],
+        // **`chicken_head` は立てない。** 姿勢は `body_attitude_rad` を直接
+        // 渡すので不要で、立てると「腕が駆動できない」警告が出るだけ。
+        // CH8 は実機で CH1/CH3 を読み替えるためのスイッチであって、
+        // ここでは通る道が違う。
+        chicken_head: false,
         body_attitude_rad: tilt,
         link_ok: true,
     };
