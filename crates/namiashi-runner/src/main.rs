@@ -102,7 +102,11 @@ pub fn viz_config(cli: &Cli) -> viz::VizConfig {
     let d = viz::VizConfig::default();
     viz::VizConfig {
         enabled: cli.flag("viz"),
-        key: cli.str("viz-key").unwrap_or(&d.key).to_string(),
+        key_planned: cli.str("viz-key").unwrap_or(&d.key_planned).to_string(),
+        key_measured: cli
+            .str("viz-key-measured")
+            .unwrap_or(&d.key_measured)
+            .to_string(),
         rate_hz: cli.f64("viz-rate").unwrap_or(d.rate_hz),
         endpoint: cli.str("viz-endpoint").map(|s| s.to_string()),
     }
@@ -153,8 +157,8 @@ fn print_help() {
   sbus   [--secs S] [--plain]
                             プロポ入力と解釈結果を表示（同上）
                             既定は再描画表示。--plain で 1 行 / 更新の逐次出力
-  legs   [--secs S] [--viz] 脚バスの状態と実効周期を表示（**指令は送らない**）
-                            --viz で**実測角**を articara へ配信（run --viz は目標角）
+  legs   [--secs S] [--viz] 脚バスと IMU の状態を表示（**指令は送らない**）
+                            --viz で**実測角と IMU 姿勢**を measured キーへ配信
 
   imu / sbus / legs は --secs 0（以下）または --forever で Ctrl-C まで回り続ける。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
@@ -185,8 +189,10 @@ calib のサブコマンド:
 
 ライブ可視化のオプション（dump / run / legs 共通）:
   --viz                     各周期の姿勢を Zenoh へ配信し articara に描かせる
-  --viz-key KEY             Zenoh キー（既定 go2/gait/planned）
-  --viz-rate HZ             配信レート（既定 50）
+                            run は指令+実測、legs は実測のみ、dump は指令のみ
+  --viz-key KEY             指令ストリームのキー（既定 go2/gait/planned）
+  --viz-key-measured KEY    実測ストリームのキー（既定 go2/gait/measured）
+  --viz-rate HZ             配信レート（既定 100）
   --viz-endpoint EP         例 tcp/127.0.0.1:7447（マルチキャスト不可の環境）
 
 run のオプション:
@@ -216,8 +222,15 @@ pub struct Cli {
 }
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
-const BOOL_FLAGS: &[&str] =
-    &["help", "allow-no-sbus", "skip-zero", "viz", "realtime", "plain", "forever"];
+const BOOL_FLAGS: &[&str] = &[
+    "help",
+    "allow-no-sbus",
+    "skip-zero",
+    "viz",
+    "realtime",
+    "plain",
+    "forever",
+];
 
 impl Cli {
     pub fn parse(args: impl Iterator<Item = String>) -> Self {

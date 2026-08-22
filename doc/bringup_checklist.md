@@ -194,12 +194,12 @@ RL 420.7Hz 最悪 5.61ms   RR 417.6Hz 最悪 6.02ms      12 軸とも ok=true / 
 ### 2-4. 関節対応の目視確認【🟢 articara / 指令は送らない】
 
 `(バス, id)` → 関節の対応と符号は、**数字を睨むより画面で見た方が速い**。
-`legs --viz` は**エンコーダの実測角**を Zenoh へ流すので、PC の articara に
-実機の姿勢がそのまま出る。**指令は一切送らない。**
+`legs --viz` は**エンコーダの実測角**を Zenoh の measured キーへ流すので、
+PC の articara に実機の姿勢がそのまま出る。**指令は一切送らない。**
 
-> `run --viz` が流すのは**目標角**なので、これとは狙いが逆。
-> 目標角は「指令どおりの姿勢」しか描かず、実機がその通り動いたかは映らない。
-> 取り違えると「画面で合っているから実機も合っている」と誤解する。
+> `run --viz` は planned（目標角）と measured（実測角）を対で流し、指令を
+> 半透明のゴーストとして重ねる。こちらはモータが動くので、対応確認の段階では
+> 使わない。
 
 ```sh
 # SBC
@@ -207,7 +207,8 @@ RL 420.7Hz 最悪 5.61ms   RR 417.6Hz 最悪 6.02ms      12 軸とも ok=true / 
 # PC（モデルは namiashi_description を clone するだけ。scp は要らない）
 cd articara && cargo run --release --features viz -- \
     --model ../namiashi_description/namiashi.misa
-#   → Live gait feed パネルにキー go2/gait/planned を入れて Start
+#   → Live gait feed パネルの measured 欄に go2/gait/measured を入れて Start
+#      （legs は measured しか出さないので target 側は増えない）
 ```
 
 **手順の全体・ネットワークの 3 通り・繋がらないときの切り分けは

@@ -154,6 +154,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut publisher = open_viz(&opts.viz)?;
     let started = Instant::now();
     let mut motors_enabled = false;
+    let mut measured_seen = false;
     let mut next = Instant::now();
     let mut last_status = Instant::now();
     let mut worst_overrun = Duration::ZERO;
@@ -201,9 +202,30 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         }
 
         if let Some(p) = publisher.as_mut() {
+            // 最初の読み戻しが済むまで measured を送らない。ゼロ姿勢のフレームは
+            // 受け側で「崩れ落ちたロボット」として描かれる。
+            // 一度立ったら見に行かない（`all_ok` は 12 軸ぶんロックを取る）。
+            if !measured_seen {
+                measured_seen = hw.legs.all_ok();
+            }
             let body = controller.body_view();
             let t = started.elapsed().as_secs_f64();
-            p.maybe_publish(|seq| viz::frame(seq, t, &out.targets, &body));
+            let att = imu.rpy_rad;
+            p.maybe_publish(|seq| {
+                let planned = viz::frame(seq, t, &out.targets, &body);
+                if !measured_seen {
+                    return viz::Frames::planned(planned);
+                }
+                // 胴体の姿勢 3 軸は IMU の実測。位置 x, y と高さはオドメトリが
+                // 無いので歩容の値のまま。**実測なのは 12 関節と姿勢だけ**で、
+                // 位置を入れたらここを差し替える。
+                let measured_body = viz::BodyView {
+                    rp: [att[0], att[1]],
+                    yaw: att[2],
+                    ..body
+                };
+                viz::Frames::both(planned, viz::frame(seq, t, &measured, &measured_body))
+            });
         }
 
         if controller.state_changed() {

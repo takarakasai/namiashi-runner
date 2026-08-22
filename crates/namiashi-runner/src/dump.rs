@@ -78,8 +78,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
         }
         if let Some(p) = publisher.as_mut() {
+            // 実機を持たない机上再生なので planned だけ。受け側はゴーストを
+            // 描かず、この 1 本でモデルを駆動する。
             let body = controller.body_view();
-            p.maybe_publish(|seq| viz::frame(seq, t, &out.targets, &body));
+            p.maybe_publish(|seq| viz::Frames::planned(viz::frame(seq, t, &out.targets, &body)));
         }
         if realtime {
             next += period;

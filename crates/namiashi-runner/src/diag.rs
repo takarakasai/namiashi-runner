@@ -243,12 +243,7 @@ fn monitor_lines(
                 .iter()
                 .map(|&k| {
                     let v = state.channels[k];
-                    format!(
-                        "CH{:>2} {} {v:>4} {}",
-                        k + 1,
-                        pad(roles[k], 8),
-                        bar(v, 12)
-                    )
+                    format!("CH{:>2} {} {v:>4} {}", k + 1, pad(roles[k], 8), bar(v, 12))
                 })
                 .collect();
             out.push(format!("  {}", cells.join("   ")));
@@ -444,13 +439,13 @@ pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
 /// ここで各バスの実効周期が出るので、`control.rate_hz` をいくつにできるかが
 /// 実測で決まる。
 ///
-/// # `--viz` で articara に出すのは「実測角」
+/// # `--viz` で出すのは measured ストリームだけ
 ///
-/// `run --viz` が流すのは**モータへ行く目標角**だが、こちらが流すのは
-/// **エンコーダから読んだ実測角**。狙いが逆で、
+/// 指令を一切出さないので、流せるのは**エンコーダから読んだ実測角**しかない。
+/// `viz::VIZ_KEY_MEASURED` にだけ put する（planned は空のまま）。
 ///
-/// - `run --viz` … 指令どおりの姿勢を描く。実機がその通り動いたかは映らない
-/// - `legs --viz` … 実機が今どうなっているかを描く。**指令は一切出さない**
+/// - `run --viz` … 指令と実測を対で流す。ゴースト重畳になる
+/// - `legs --viz` … 実測のみ。ゴーストは出ない。**指令は一切出さない**
 ///
 /// 立ち上げでやりたいのは後者。脚を手で動かして、画面のモデルが同じように
 /// 動くかを見れば、`(バス, id)` → 関節の対応と符号を目で確認できる。
@@ -467,8 +462,29 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Resul
 
     let mut publisher = crate::runner::open_viz(viz_cfg)?;
     if publisher.is_some() {
-        println!("  ライブ可視化: **実測角**を配信します（目標角ではありません）");
+        println!("  ライブ可視化: **実測角のみ**を配信します（指令は出しません）");
     }
+    // IMU は measured の `pose_rp`（胴体の roll/pitch）を埋めるために開く。
+    // ここでも**指令は出さない**ので、読むだけで機体は動かない。
+    // 開けなくても関節角の確認は続けられるので、失敗は警告に留める。
+    let imu = match ImuReader::connect(&cfg.hardware.imu) {
+        Ok(r) => {
+            println!(
+                "  IMU → {}（胴体の roll/pitch を measured に載せます）",
+                r.port()
+            );
+            if let Err(e) = r.wait_ready(Duration::from_secs(3)) {
+                println!("  ⚠ IMU がまだ値を返しません: {e}");
+            }
+            Some(r)
+        }
+        Err(e) => {
+            println!("  ⚠ IMU を開けません: {e}");
+            println!("    関節角の確認は続けられますが、pose_rp は [0,0] のままです");
+            None
+        }
+    };
+    let mut measured_seen = false;
     let started = Instant::now();
     // 表示は 500 ms ごとで十分だが、可視化はもっと細かく出したい。
     // ループは可視化のレートで回し、テキストは間引く。
@@ -488,8 +504,26 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Resul
                     q.legs[leg][k] = s.position_rad;
                 }
             }
-            let t = started.elapsed().as_secs_f64();
-            p.maybe_publish(|seq| viz::frame(seq, t, &q, &viz::BodyView::default()));
+            // 最初の読み戻しが済むまで送らない（ゼロ姿勢は「崩れ落ちた」絵になる）。
+            if !measured_seen {
+                measured_seen = states.iter().flatten().all(|s| s.ok);
+            }
+            if measured_seen {
+                // 胴体の姿勢 3 軸は IMU の実測。位置 x, y は測る術が無いので 0、
+                // 高さも設定の起立高さを入れるだけで、モデルが床にめり込まない
+                // ようにするためのもの（**測定値ではない**）。
+                let att = imu
+                    .as_ref()
+                    .map_or([0.0; 3], |r| r.sample_or_level().rpy_rad);
+                let body = viz::BodyView {
+                    z: cfg.gait.stance_height_m,
+                    rp: [att[0], att[1]],
+                    yaw: att[2],
+                    ..Default::default()
+                };
+                let t = started.elapsed().as_secs_f64();
+                p.maybe_publish(|seq| viz::Frames::measured(viz::frame(seq, t, &q, &body)));
+            }
         }
 
         if Instant::now() < next_text {
@@ -518,6 +552,22 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Resul
                 } else {
                     format!(" 直近エラー: {}", bus.last_error())
                 }
+            );
+        }
+        if let Some(r) = imu.as_ref() {
+            let s = r.sample_or_level();
+            let st = r.stats();
+            println!(
+                "IMU rpy=({:+7.2},{:+7.2},{:+7.2})°  gyro=({:+7.2},{:+7.2},{:+7.2})°/s  \
+                 {:.0}Hz err={}",
+                s.rpy_rad[0].to_degrees(),
+                s.rpy_rad[1].to_degrees(),
+                s.rpy_rad[2].to_degrees(),
+                s.gyro_rad_s[0].to_degrees(),
+                s.gyro_rad_s[1].to_degrees(),
+                s.gyro_rad_s[2].to_degrees(),
+                st.rate_hz,
+                st.errors,
             );
         }
         println!("--");

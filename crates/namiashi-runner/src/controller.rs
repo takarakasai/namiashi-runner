@@ -279,6 +279,9 @@ impl Controller {
             ],
             yaw: out.body_state.world_yaw,
             z: self.cfg.gait.stance_height_m + cmd.height_offset_m,
+            // 歩容は水平計画なので planned の roll/pitch は常に 0。
+            // 姿勢を計画する制御（MPC 等）を入れたらここに載せる。
+            rp: [0.0, 0.0],
             stance: [
                 out.legs[0].phase.is_stance,
                 out.legs[1].phase.is_stance,

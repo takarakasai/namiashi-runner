@@ -2469,7 +2469,7 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#1e561a11c88d4fbfe35ff5f224c61d986cb04eef"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#d2ce2f3ea63795fce85bb9831809747b0768bc9f"
 dependencies = [
  "clarabel",
  "log",
