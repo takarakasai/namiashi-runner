@@ -184,10 +184,16 @@ impl Controller {
     ) -> ControlOutput {
         let before = self.state;
 
-        // 歩容の切り替えは、脚が地面にあるあいだにやると踏み替えが飛ぶ。
-        // 脱力中と遷移中だけ差し替える。
-        if cmd.gait != self.gait_select && !matches!(self.state, State::Active | State::PlayingPose)
-        {
+        // 歩容の切り替えは、**遊脚がある最中にやると踏み替えが飛ぶ**。
+        // 脱力中・初期姿勢・遷移中に加えて、**歩容中でも静止していれば許す**。
+        //
+        // 速度が 0 のとき歩容は `holding` に入り、全脚接地・位相凍結で
+        // 静止姿勢を出している（quadruped-gait `PhaseGenerator`）。
+        // その状態なら差し替えても飛ぶ遊脚が無い。
+        //
+        // 試合では「立って待っている間に歩容を選び直す」が要る。初期姿勢
+        // まで戻さないと選べないのでは使いにくい。
+        if cmd.gait != self.gait_select && self.can_switch_gait() {
             self.set_gait(cmd.gait);
         }
 
@@ -484,14 +490,32 @@ impl Controller {
         self.robot.output_to_joints(&out, self.targets.arm)
     }
 
+    /// いま歩容を差し替えてよいか。
+    ///
+    /// **判定は「遊脚があるか」であって状態名ではない。** `Active` でも
+    /// 速度 0 で立っているだけなら全脚が接地しており、差し替えても飛ばない。
+    /// ポーズ再生中は再生を壊すので許さない。
+    fn can_switch_gait(&self) -> bool {
+        match self.state {
+            State::PlayingPose => false,
+            State::Active => {
+                // 指令が 0 まで落ちきっていて、かつ 4 脚とも接地している。
+                // どちらか一方では足りない（落としきる途中は遊脚が残る）。
+                self.ramped_v.iter().all(|v| *v == 0.0) && self.body_view.stance.iter().all(|&s| s)
+            }
+            _ => true,
+        }
+    }
+
     /// 速度指令を `gait.velocity_ramp_s` で鈍らせる。
     ///
     /// 各軸の上限レートは「その軸の最大値 ÷ ランプ時間」なので、**どの軸も
     /// 全開から中立まで同じ時間**で戻る。歩き出す側だけでなく**止まる側にも
     /// 同じレートがかかる**（実測では止まるときも 27.9 rad/s 跳んでいた）。
     fn ramp_velocity(&mut self, want: [f64; 3], dt: f64) -> [f64; 3] {
-        let ramp_s = self.cfg.gait.velocity_ramp_s;
-        if ramp_s <= 0.0 || dt <= 0.0 {
+        let up_s = self.cfg.gait.velocity_ramp_s;
+        let down_s = self.cfg.gait.velocity_ramp_stop_s;
+        if dt <= 0.0 || (up_s <= 0.0 && down_s <= 0.0) {
             self.ramped_v = want;
             return want;
         }
@@ -501,6 +525,14 @@ impl Controller {
             self.cfg.gait.max_wz_rad_s,
         ];
         for k in 0..3 {
+            // **上げる側と下げる側でレートが違う。止まるのは速く。**
+            // 落としている軸か（絶対値が小さくなる向きか）で選ぶ。
+            let slowing = want[k].abs() < self.ramped_v[k].abs();
+            let ramp_s = if slowing { down_s } else { up_s };
+            if ramp_s <= 0.0 {
+                self.ramped_v[k] = want[k];
+                continue;
+            }
             let step = (full[k].abs() / ramp_s) * dt;
             let d = (want[k] - self.ramped_v[k]).clamp(-step, step);
             self.ramped_v[k] += d;
@@ -514,13 +546,13 @@ impl Controller {
         //
         // なので全脚が接地している瞬間まで微速で歩かせ、そこで 0 に落とす。
         const CREEP_M_S: f64 = 1e-3;
-        const SETTLE_TIMEOUT_S: f64 = 2.0;
+        let settle_timeout_s = self.cfg.gait.stop_settle_s;
         let stopping = want.iter().all(|v| *v == 0.0);
         let nearly_stopped = self.ramped_v.iter().all(|v| v.abs() <= CREEP_M_S);
         if stopping && nearly_stopped {
             // 接地フラグは前周期の歩容出力（`body_view`）から取る。
             let all_stance = self.body_view.stance.iter().all(|&s| s);
-            if all_stance || self.settling_s >= SETTLE_TIMEOUT_S {
+            if all_stance || self.settling_s >= settle_timeout_s {
                 self.settling_s = 0.0;
                 self.ramped_v = [0.0; 3];
                 return self.ramped_v;
@@ -603,26 +635,43 @@ mod tests {
 
             let mut go = stand;
             go.vx_m_s = 0.10;
-            let mut worst: f64 = 0.0;
-            // 歩き出して、また止まる。**両側に跳びがある。**
-            for phase in [go, stand] {
+            let mut worst = [0.0f64; 2];
+            // 0 = 歩き出し、1 = 停止。**跳びの性質が違う。**
+            for (phase_i, phase) in [go, stand].into_iter().enumerate() {
                 for _ in 0..400 {
                     let q = c.tick(&phase, &JointVec::zeros(), &imu(), dt).targets;
                     for l in 0..4 {
                         for k in 0..3 {
-                            worst = worst.max((q.legs[l][k] - prev.legs[l][k]).abs() / dt);
+                            let r = (q.legs[l][k] - prev.legs[l][k]).abs() / dt;
+                            worst[phase_i] = worst[phase_i].max(r);
                         }
                     }
                     prev = q;
                 }
             }
-            // ランプと全脚接地待ちを入れて 3.3〜5.4 rad/s。無しでは 9.9〜31.5。
+            // **歩き出し側はランプで消える。** ランプ無しでは 9.9〜31.5 rad/s。
             assert!(
-                worst < 6.0,
-                "{} で目標が {:.2} rad/s 跳んだ（{:.1}°/周期）",
+                worst[0] < 6.0,
+                "{} の歩き出しで目標が {:.2} rad/s 跳んだ（{:.1}°/周期）",
                 select.label(),
-                worst,
-                (worst * dt).to_degrees()
+                worst[0],
+                (worst[0] * dt).to_degrees()
+            );
+            // **停止側は跳びを残してある。意図的なトレードオフ。**
+            //
+            // 歩容は `v = 0` で静止姿勢へ分岐し遊脚を一気に接地させる。
+            // 全脚接地まで待てば消えるが、**trot は 4 脚が同時に接地しない
+            // ことがあり、待つと停止に 2.5 s かかる**（実機で「スティックを
+            // 戻しても数秒止まらない」として出た）。リング外へ出る方が
+            // 危険なので、`gait.stop_settle_s` を短くして跳びを受け入れた。
+            //
+            // **実際の関節運動は `max_target_rate_rad_s` で頭打ちされる。**
+            // 0.19 rad を 3 rad/s で追うので約 62 ms の動き。
+            assert!(
+                worst[1] < 45.0,
+                "{} の停止で目標が {:.2} rad/s 跳んだ（想定より大きい）",
+                select.label(),
+                worst[1]
             );
         }
     }
@@ -664,6 +713,67 @@ mod tests {
             }
             for _ in 0..5 {
                 c.tick(&back, &JointVec::zeros(), &imu(), dt);
+            }
+        }
+    }
+
+    /// **スティックを中立に戻したら素早く止まる。**
+    ///
+    /// 停止が遅いとリング外へ出る。かつて全脚接地待ちが 2.0 s 固定で、
+    /// **trot は 4 脚が同時に接地しないことがあるため毎回 2 s 待ち切って
+    /// いた**（ランプ 0.5 s と合わせて最大 2.5 s）。実機で「スティックを
+    /// 戻しても数秒止まらない」として出た（2026-08-22、本番前日）。
+    #[test]
+    fn centring_the_stick_stops_the_gait_promptly() {
+        let dt = 0.005;
+        for (label, ramp, stop_ramp, settle) in [
+            ("旧(2.0s待ち)", 0.5, 0.5, 2.0),
+            ("新(既定)", 0.5, 0.15, 0.25),
+        ] {
+            println!("--- {label} ---");
+            for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+                let mut cfg = AppConfig::default();
+                cfg.gait.velocity_ramp_s = ramp;
+                cfg.gait.velocity_ramp_stop_s = stop_ramp;
+                cfg.gait.stop_settle_s = settle;
+                let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+                let mut c = Controller::new(robot, cfg);
+                let mut go = cmd(ModeRequest::Walk);
+                go.gait = select;
+                go.vx_m_s = 0.15;
+                go.wz_rad_s = 0.6;
+                run_until(&mut c, &go, State::Active, 20.0);
+                for _ in 0..400 {
+                    c.tick(&go, &JointVec::zeros(), &imu(), dt);
+                }
+                // 中立へ戻す。歩容が完全に静止するまでの時間を測る。
+                let centre = {
+                    let mut x = go;
+                    x.vx_m_s = 0.0;
+                    x.wz_rad_s = 0.0;
+                    x
+                };
+                let mut stopped_at = None;
+                let mut prev = c.tick(&centre, &JointVec::zeros(), &imu(), dt).targets;
+                for i in 1..600 {
+                    let q = c.tick(&centre, &JointVec::zeros(), &imu(), dt).targets;
+                    // 目標がまったく動かなくなったら静止。
+                    if q.max_abs_diff(&prev) < 1e-12 && c.ramped_v.iter().all(|v| *v == 0.0) {
+                        stopped_at = Some(i as f64 * dt);
+                        break;
+                    }
+                    prev = q;
+                }
+                let t = stopped_at.unwrap_or(f64::INFINITY);
+                println!("  {:6} 停止まで {:.3} s", select.label(), t);
+                if label.starts_with("新") {
+                    assert!(
+                        t < 0.6,
+                        "{} で停止に {:.2} s かかった（リング外へ出る）",
+                        select.label(),
+                        t
+                    );
+                }
             }
         }
     }
@@ -901,6 +1011,90 @@ mod tests {
             }
         }
         assert!(moved, "歩行指令を出しても関節が動いていません");
+    }
+
+    #[test]
+    /// **立って止まっている間なら歩容を選び直せる。歩いている間は不可。**
+    ///
+    /// 判定は状態名ではなく「遊脚があるか」。速度 0 のとき歩容は
+    /// `holding` に入り全脚接地・位相凍結なので、差し替えても飛ぶ遊脚が無い。
+    #[test]
+    fn the_gait_can_be_switched_while_standing_still_but_not_while_moving() {
+        let dt = 0.005;
+        let mut c = controller();
+        // 速度 0 の歩容（= 立ち姿勢で静止）まで持っていく。
+        let stand = cmd(ModeRequest::Walk);
+        run_until(&mut c, &stand, State::Active, 20.0);
+        for _ in 0..200 {
+            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+        }
+        let before = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+
+        // 静止中なら切り替わる。
+        let mut to_trot = stand;
+        to_trot.gait = GaitSelect::Trot;
+        let after = c.tick(&to_trot, &JointVec::zeros(), &imu(), dt).targets;
+        assert_eq!(c.gait_select(), GaitSelect::Trot, "静止中に歩容を選べない");
+        assert_eq!(c.state(), State::Active);
+
+        // **差し替えで脚が飛ばないこと。** 立ち姿勢は歩容によらず同じはず。
+        let jump = after.max_abs_diff(&before);
+        assert!(
+            jump < 1e-3,
+            "歩容を差し替えたら目標が {:.4} rad 飛んだ（{:.2}°）",
+            jump,
+            jump.to_degrees()
+        );
+
+        // 歩き出したら切り替わらない。
+        let mut moving = to_trot;
+        moving.vx_m_s = 0.10;
+        for _ in 0..200 {
+            c.tick(&moving, &JointVec::zeros(), &imu(), dt);
+        }
+        let mut to_crawl = moving;
+        to_crawl.gait = GaitSelect::Crawl;
+        c.tick(&to_crawl, &JointVec::zeros(), &imu(), dt);
+        assert_eq!(
+            c.gait_select(),
+            GaitSelect::Trot,
+            "歩行中に歩容が切り替わった（踏み替えが飛ぶ）"
+        );
+    }
+
+    /// **初期姿勢で待っている間に歩容を選べる。** 試合の実際の使い方。
+    ///
+    /// スタートボックスに置いて CH5 中段で待ち、そこで CH6 を決めてから
+    /// 合図で上段へ倒す。ここで切り替えられないと**起動時に決め打ち**に
+    /// なってしまう。
+    #[test]
+    fn the_gait_can_be_switched_while_holding_the_start_pose() {
+        let mut c = controller();
+        run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
+        assert_eq!(c.gait_select(), GaitSelect::Crawl);
+
+        let mut hold_trot = cmd(ModeRequest::Stand);
+        hold_trot.gait = GaitSelect::Trot;
+        c.tick(&hold_trot, &JointVec::zeros(), &imu(), 0.005);
+        assert_eq!(
+            c.gait_select(),
+            GaitSelect::Trot,
+            "初期姿勢中に歩容を選べない"
+        );
+        // 姿勢は保持したまま。歩容を差し替えても動き出さない。
+        assert_eq!(c.state(), State::HoldingStart);
+
+        // 何度でも選び直せる。
+        let mut hold_walk = cmd(ModeRequest::Stand);
+        hold_walk.gait = GaitSelect::Walk;
+        c.tick(&hold_walk, &JointVec::zeros(), &imu(), 0.005);
+        assert_eq!(c.gait_select(), GaitSelect::Walk);
+
+        // そのまま歩容へ入れば、選んだ歩容で歩き出す。
+        let mut go = cmd(ModeRequest::Walk);
+        go.gait = GaitSelect::Walk;
+        run_until(&mut c, &go, State::Active, 20.0);
+        assert_eq!(c.gait_select(), GaitSelect::Walk);
     }
 
     #[test]
