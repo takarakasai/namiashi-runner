@@ -114,25 +114,31 @@ impl Robot {
         &self,
         out: &ControllerOutput,
         arm: f64,
-        attitude_rad: [f64; 2],
+        attitude_rad: [f64; 3],
     ) -> (JointVec, bool) {
-        let [roll, pitch] = attitude_rad;
-        if roll == 0.0 && pitch == 0.0 {
+        let [roll, pitch, yaw] = attitude_rad;
+        if roll == 0.0 && pitch == 0.0 && yaw == 0.0 {
             return (self.output_to_joints(out, arm), out.all_reachable());
         }
         let mut q = JointVec::zeros();
         q.arm = arm;
         let mut reachable = true;
-        // 胴体を +roll / +pitch 傾ける = 胴体座標系で見た足先を −roll / −pitch
-        // 回す。順序は Rx(−roll) → Ry(−pitch)。
+        // 胴体を +roll/+pitch/+yaw 傾ける = 胴体座標系で見た足先を逆向きに
+        // 回す。順序は Rz(−yaw) → Rx(−roll) → Ry(−pitch)。
+        //
+        // **yaw は「足を接地したまま胴体をひねる」** 動作になる。足先は
+        // 胴体中心まわりに接線方向へ動くので、hip の可動域を食う。
+        let (sy_, cy) = (-yaw).sin_cos();
         let (sr, cr) = (-roll).sin_cos();
         let (sp, cp) = (-pitch).sin_cos();
         for (slot, leg_out) in out.legs.iter().enumerate() {
             let f = leg_out.foot_body;
+            // Rz(−yaw)
+            let (x0, y0) = (f.x * cy - f.y * sy_, f.x * sy_ + f.y * cy);
             // Rx(−roll)
-            let (y1, z1) = (f.y * cr - f.z * sr, f.y * sr + f.z * cr);
+            let (y1, z1) = (y0 * cr - f.z * sr, y0 * sr + f.z * cr);
             // Ry(−pitch)
-            let (x2, z2) = (f.x * cp + z1 * sp, -f.x * sp + z1 * cp);
+            let (x2, z2) = (x0 * cp + z1 * sp, -x0 * sp + z1 * cp);
             let target = nalgebra::Vector3::new(x2, y1, z2);
             // 膝はすべて後ろ向き（`build_gait` の `KneePattern::BothBack`）。
             // ここが食い違うと逆向きに曲がった解が返る。

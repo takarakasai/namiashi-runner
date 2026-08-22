@@ -33,6 +33,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let tilt = [
         cli.f64("tilt-roll").unwrap_or(0.0),
         cli.f64("tilt-pitch").unwrap_or(0.0),
+        cli.f64("tilt-yaw").unwrap_or(0.0),
     ];
     let every = cli.usize("every").unwrap_or(20).max(1);
     let viz_cfg = crate::viz_config(cli);
@@ -80,13 +81,14 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         "歩容 {} / v=({vx:+.3}, {vy:+.3}, {wz:+.3}) / {:.0} Hz / {seconds:.1} s{}",
         gait.label(),
         cfg.control.rate_hz,
-        if tilt == [0.0; 2] {
+        if tilt == [0.0; 3] {
             String::new()
         } else {
             format!(
-                " / 胴体 roll {:+.1}° pitch {:+.1}°",
+                " / 胴体 roll {:+.1}° pitch {:+.1}° yaw {:+.1}°",
                 tilt[0].to_degrees(),
-                tilt[1].to_degrees()
+                tilt[1].to_degrees(),
+                tilt[2].to_degrees()
             )
         }
     );

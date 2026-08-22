@@ -259,10 +259,11 @@ fn monitor_lines(
     // **姿勢モードが on の間、vy と高さは 0 になり、代わりに roll/pitch が出る。**
     // 上の行だけ見ていると「スティックを倒しているのに vy が 0」で悩む。
     out.push(format!(
-        "  姿勢={}   roll={:+.3} rad   pitch={:+.3} rad",
+        "  姿勢={}   roll={:+.3}   pitch={:+.3}   yaw={:+.3} rad",
         if cmd.chicken_head { "on" } else { "off" },
         cmd.body_attitude_rad[0],
-        cmd.body_attitude_rad[1]
+        cmd.body_attitude_rad[1],
+        cmd.body_attitude_rad[2]
     ));
     out.push(format!(
         "  モード={:?}   歩容={}   ポーズ={}   振る足={}   腕={}",
@@ -287,7 +288,7 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
         .collect();
     format!(
         "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} alt={} \
-         att={}({:+.3},{:+.3}) arm={} {} {} {:.0}fps frames={} desync={}",
+         att={}({:+.3},{:+.3},{:+.3}) arm={} {} {} {:.0}fps frames={} desync={}",
         raw.join(" "),
         cmd.vx_m_s,
         cmd.vy_m_s,
@@ -300,6 +301,7 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
         cmd.chicken_head,
         cmd.body_attitude_rad[0],
         cmd.body_attitude_rad[1],
+        cmd.body_attitude_rad[2],
         match cmd.arm_rad {
             Some(q) => format!("{q:+.3}rad"),
             None => "-".to_string(),
@@ -645,12 +647,13 @@ fn print_teleop(t: &TeleopConfig) {
     );
     println!(
         "  CH{} ポーズ再生  CH{} 振る足の選択(下=greeting 上=greeting_alt)  \
-         CH{} 姿勢モード(ON で CH{}=ロール CH{}=ピッチ)",
+         CH{} 姿勢モード(ON で CH{}=ロール CH{}=ピッチ CH{}=ヨー)",
         t.pose.channel,
         t.pose_select.channel,
         t.chicken_head.channel,
         t.vy.channel,
-        t.height.channel
+        t.height.channel,
+        t.wz.channel
     );
     match &t.arm {
         Some(arm) => println!("  CH{} 腕（観測のみ。アプリからは駆動しない）", arm.channel),

@@ -105,7 +105,7 @@ pub struct Controller {
     ///
     /// **CH8 を切り替えた瞬間に胴体が跳ねないため。** 指令をそのまま
     /// 渡すと、ON の瞬間にスティックの位置ぶんだけ一気に傾く。
-    tilt_rad: [f64; 2],
+    tilt_rad: [f64; 3],
     /// 姿勢が可動域に届かないことを 1 度だけ警告するためのフラグ。
     warned_tilt_reach: bool,
     /// ポーズ再生を要求した瞬間に CH8 が入っていたか（振る足の選択）。
@@ -148,7 +148,7 @@ impl Controller {
             warned_body_height: false,
             ramped_v: [0.0; 3],
             settling_s: 0.0,
-            tilt_rad: [0.0; 2],
+            tilt_rad: [0.0; 3],
             warned_tilt_reach: false,
             alt_pose_requested: false,
             body_view: BodyView::default(),
@@ -449,14 +449,14 @@ impl Controller {
     ///
     /// `ChickenHead` と同じ形。**切り替えた瞬間に跳ねないことが目的**なので、
     /// 有効・無効のどちらへ向かうときも同じ時定数を通す。
-    fn tilt_toward(&mut self, want: [f64; 2], dt: f64) {
+    fn tilt_toward(&mut self, want: [f64; 3], dt: f64) {
         let tau = self.cfg.gait.body_attitude_tau_s.max(0.0);
         let alpha = if tau > 0.0 && dt > 0.0 {
             (dt / (tau + dt)).clamp(0.0, 1.0)
         } else {
             1.0
         };
-        for k in 0..2 {
+        for k in 0..3 {
             self.tilt_rad[k] += (want[k] - self.tilt_rad[k]) * alpha;
         }
     }
@@ -537,7 +537,7 @@ impl Controller {
         // 次に立ち上がったとき、前回の速度から歩き出さないように。
         self.ramped_v = [0.0; 3];
         // 姿勢も戻す。傾けたまま脱力 → 再起立で胴体が傾いたまま出てこない。
-        self.tilt_rad = [0.0; 2];
+        self.tilt_rad = [0.0; 3];
     }
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
@@ -659,7 +659,7 @@ mod tests {
             play_pose: false,
             play_alt: false,
             chicken_head: false,
-            body_attitude_rad: [0.0; 2],
+            body_attitude_rad: [0.0; 3],
             link_ok: true,
         }
     }
@@ -1117,7 +1117,7 @@ mod tests {
         // ロールを入れる。
         let mut roll = stand;
         roll.chicken_head = true;
-        roll.body_attitude_rad = [0.15, 0.0];
+        roll.body_attitude_rad = [0.15, 0.0, 0.0];
         let mut tilted = flat;
         for _ in 0..100 {
             tilted = c.tick(&roll, &JointVec::zeros(), &imu(), dt).targets;
@@ -1134,7 +1134,7 @@ mod tests {
         // 検算: h = 0.2, θ = 0.15 → Δy = −0.0299 m、hip ≈ atan(0.0299/0.2)
         // = 0.148 rad。
         let mut minus = roll;
-        minus.body_attitude_rad = [-0.15, 0.0];
+        minus.body_attitude_rad = [-0.15, 0.0, 0.0];
         let mut mirrored = flat;
         for _ in 0..200 {
             mirrored = c.tick(&minus, &JointVec::zeros(), &imu(), dt).targets;
@@ -1173,6 +1173,43 @@ mod tests {
             back.max_abs_diff(&flat) < 1e-6,
             "姿勢を戻しても元に戻らない"
         );
+    }
+
+    /// **yaw は前後の脚が逆向きに動く**（ひねり）。roll とは別の形。
+    ///
+    /// 足を接地したまま胴体を水平面内でひねる。roll/pitch より可動域に
+    /// 余裕があり、実測では 1.2 rad (69°) でも範囲内だった
+    /// （roll は 0.65 rad で頭打ち）。hip の横方向の可動域が広いため。
+    #[test]
+    fn yawing_the_body_twists_front_against_rear() {
+        let dt = 0.005;
+        let mut cfg = AppConfig::default();
+        cfg.gait.body_attitude_max_rad = 0.5;
+        cfg.gait.body_attitude_tau_s = 0.0;
+        let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+        let mut c = Controller::new(robot, cfg);
+        let stand = cmd(ModeRequest::Walk);
+        run_until(&mut c, &stand, State::Active, 20.0);
+        for _ in 0..200 {
+            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+        }
+        let flat = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+
+        let mut yaw = stand;
+        yaw.chicken_head = true;
+        yaw.body_attitude_rad = [0.0, 0.0, 0.4];
+        let mut twisted = flat;
+        for _ in 0..200 {
+            twisted = c.tick(&yaw, &JointVec::zeros(), &imu(), dt).targets;
+        }
+        // 前脚と後脚の hip が逆向きに動く。これがひねりの証拠。
+        let front = twisted.legs[0][0] - flat.legs[0][0]; // FL
+        let rear = twisted.legs[2][0] - flat.legs[2][0]; // RL
+        assert!(
+            front * rear < 0.0,
+            "前後の hip が同じ向きに動いた（ひねりになっていない）: 前 {front:+.4} 後 {rear:+.4}"
+        );
+        assert!(front.abs() > 0.05, "ひねりが小さすぎる: {front:+.4}");
     }
 
     /// **立って止まっている間なら歩容を選び直せる。歩いている間は不可。**

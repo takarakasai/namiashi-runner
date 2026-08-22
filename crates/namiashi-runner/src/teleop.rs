@@ -345,7 +345,7 @@ pub struct OperatorCommand {
     /// CH8 が ON のとき、CH1 をロール、CH3 をピッチに読み替える。
     /// **同時に横移動と高さは 0 になる** — 同じスティックを 2 つの意味で
     /// 使えないため。
-    pub body_attitude_rad: [f64; 2],
+    pub body_attitude_rad: [f64; 3],
     /// 受信が生きているか。false のときの速度は必ず 0 になっている。
     pub link_ok: bool,
 }
@@ -375,7 +375,7 @@ impl OperatorCommand {
             play_pose: false,
             play_alt: false,
             chicken_head: false,
-            body_attitude_rad: [0.0; 2],
+            body_attitude_rad: [0.0; 3],
             link_ok: false,
         }
     }
@@ -473,13 +473,15 @@ impl Teleop {
         // 同じスティックを 2 つの意味で使うので、横移動と高さは 0 にする
         // （両方効かせると「傾けながら横に流れる」になって操縦できない）。
         let chicken_head = self.cfg.chicken_head.position(state) > 0;
-        let (vy, height, attitude) = if chicken_head {
+        let (vy, height, wz, attitude) = if chicken_head {
             // **合成量で頭打ちにする（円形の制限）。**
             //
             // 軸ごとに上限を掛けると、斜めに振り切ったとき √2 倍まで傾く。
             // 実測では roll 単独 0.65 rad まで可動域内なのに、roll と pitch を
             // 同時に 0.50 入れると 917 件逸脱した。スティックは円形に動くので、
             // 制限も円形にするのが素直。
+            // roll / pitch は合成量で頭打ち（スティックは円形に動く）。
+            // **yaw は別のスティックなので独立に頭打ちにする。**
             let r = self.cfg.vy.value(state) * self.attitude_max;
             let p = self.cfg.height.value(state) * self.attitude_max;
             let n = (r * r + p * p).sqrt();
@@ -488,19 +490,21 @@ impl Teleop {
             } else {
                 1.0
             };
-            (0.0, 0.0, [r * k, p * k])
+            let y = self.cfg.wz.value(state) * self.attitude_max;
+            (0.0, 0.0, 0.0, [r * k, p * k, y])
         } else {
             (
                 self.cfg.vy.value(state) * self.max_vy,
                 self.cfg.height.value(state) * self.height_range,
-                [0.0; 2],
+                self.cfg.wz.value(state) * self.max_wz,
+                [0.0; 3],
             )
         };
 
         OperatorCommand {
             vx_m_s: self.cfg.vx.value(state) * self.max_vx,
             vy_m_s: vy,
-            wz_rad_s: self.cfg.wz.value(state) * self.max_wz,
+            wz_rad_s: wz,
             height_offset_m: height,
             arm_rad: self.arm_angle(state),
             mode,
@@ -678,7 +682,7 @@ mod tests {
             &state_with(&[(8, RAW_MAX), (1, RAW_MAX), (3, RAW_MAX)]),
             true,
         );
-        let [r, p] = cmd.body_attitude_rad;
+        let [r, p, _y] = cmd.body_attitude_rad;
         let n = (r * r + p * p).sqrt();
         assert!(n <= 0.6 + 1e-9, "合成量 {n:.4} が上限 0.6 を超えた");
         assert!(
@@ -696,7 +700,7 @@ mod tests {
         // **CH8 を明示的に下げる。** 2 段スイッチの閾値は中央なので、
         // `state_with` の既定（全チャンネル中央）では ON と読まれる。
         let cmd = t.update(&state_with(&[(8, RAW_MIN), (1, RAW_MAX)]), true);
-        assert_eq!(cmd.body_attitude_rad, [0.0; 2]);
+        assert_eq!(cmd.body_attitude_rad, [0.0; 3]);
         assert!(cmd.vy_m_s.abs() > 0.0);
     }
 
