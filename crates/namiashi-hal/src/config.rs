@@ -188,6 +188,11 @@ fn default_gear_ratio() -> f64 {
 /// **歯数のまま持つ。** 1.55 と丸めると 0.36% ずれ、calf の端で約 0.5° になる。
 pub const CALF_PULLEY_TEETH: (f64, f64) = (28.0, 18.0);
 
+/// calf の可動域 (rad)。±154.52338°、2026-08-21 の設計変更後の値。
+///
+/// thigh の ±2.62 rad (±150.11°) とは違うので、まとめて扱わないこと。
+pub const CALF_LIMIT_RAD: f64 = 2.6969417523103556;
+
 fn default_max_speed() -> f64 {
     8.0
 }
@@ -425,7 +430,8 @@ impl Default for HardwareConfig {
                 LegSlot::Fl | LegSlot::Rl => (-0.785, 1.05),
                 LegSlot::Fr | LegSlot::Rr => (-1.05, 0.785),
             };
-            [hip, (-2.62, 2.62), (-2.62, 2.62)]
+            // calf だけ可動域が違う。2026-08-21 の設計変更で ±154.52338°。
+            [hip, (-2.62, 2.62), (-CALF_LIMIT_RAD, CALF_LIMIT_RAD)]
         };
         // 符号は設計データ由来で、実機で確認済み（2026-08-21）。
         //
