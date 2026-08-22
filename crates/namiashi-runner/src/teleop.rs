@@ -459,14 +459,21 @@ impl Teleop {
         // （両方効かせると「傾けながら横に流れる」になって操縦できない）。
         let chicken_head = self.cfg.chicken_head.position(state) > 0;
         let (vy, height, attitude) = if chicken_head {
-            (
-                0.0,
-                0.0,
-                [
-                    self.cfg.vy.value(state) * self.attitude_max,
-                    self.cfg.height.value(state) * self.attitude_max,
-                ],
-            )
+            // **合成量で頭打ちにする（円形の制限）。**
+            //
+            // 軸ごとに上限を掛けると、斜めに振り切ったとき √2 倍まで傾く。
+            // 実測では roll 単独 0.65 rad まで可動域内なのに、roll と pitch を
+            // 同時に 0.50 入れると 917 件逸脱した。スティックは円形に動くので、
+            // 制限も円形にするのが素直。
+            let r = self.cfg.vy.value(state) * self.attitude_max;
+            let p = self.cfg.height.value(state) * self.attitude_max;
+            let n = (r * r + p * p).sqrt();
+            let k = if n > self.attitude_max && n > 0.0 {
+                self.attitude_max / n
+            } else {
+                1.0
+            };
+            (0.0, 0.0, [r * k, p * k])
         } else {
             (
                 self.cfg.vy.value(state) * self.max_vy,
@@ -622,6 +629,42 @@ mod tests {
     ///
     /// かつて一律 `Stand` を返していたため、**脱力中に受信が切れると
     /// 立ち上がっていた**（実機で確認、2026-08-22）。
+    /// **斜めに振り切っても合成量が上限を超えない。**
+    ///
+    /// 軸ごとに掛けると √2 倍になり、実測でも roll+pitch 同時 0.50 で
+    /// 可動域を 917 件逸脱した（roll 単独なら 0.65 まで入る）。
+    #[test]
+    fn the_body_attitude_is_clamped_by_its_magnitude() {
+        let mut gait = GaitTuning::default();
+        gait.body_attitude_max_rad = 0.6;
+        let mut t = Teleop::new(TeleopConfig::default(), &gait, &arm_cfg());
+        // CH8 ON、CH1 と CH3 を両方振り切る。
+        let cmd = t.update(
+            &state_with(&[(8, RAW_MAX), (1, RAW_MAX), (3, RAW_MAX)]),
+            true,
+        );
+        let [r, p] = cmd.body_attitude_rad;
+        let n = (r * r + p * p).sqrt();
+        assert!(n <= 0.6 + 1e-9, "合成量 {n:.4} が上限 0.6 を超えた");
+        assert!(
+            n > 0.5,
+            "合成量 {n:.4} が小さすぎる（斜めで効かなくなっている）"
+        );
+        // 単軸なら上限いっぱいまで入る。
+        let cmd = t.update(&state_with(&[(8, RAW_MAX), (1, RAW_MAX)]), true);
+        assert!(
+            cmd.body_attitude_rad[0].abs() > 0.55,
+            "単軸で上限まで入らない: {:?}",
+            cmd.body_attitude_rad
+        );
+        // CH8 が OFF なら傾かず、横移動が戻る。
+        // **CH8 を明示的に下げる。** 2 段スイッチの閾値は中央なので、
+        // `state_with` の既定（全チャンネル中央）では ON と読まれる。
+        let cmd = t.update(&state_with(&[(8, RAW_MIN), (1, RAW_MAX)]), true);
+        assert_eq!(cmd.body_attitude_rad, [0.0; 2]);
+        assert!(cmd.vy_m_s.abs() > 0.0);
+    }
+
     #[test]
     fn a_lost_link_never_escalates_the_mode() {
         assert_eq!(ModeRequest::Relax.capped_for_failsafe(), ModeRequest::Relax);
