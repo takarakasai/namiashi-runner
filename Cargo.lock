@@ -1757,7 +1757,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lkmotor-driver"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#ef557f0e97c5fb915c345ebed1c2be16aec57218"
+source = "git+https://github.com/takarakasai/misa-actuator.git#1b462d3aa2a822e77b64828e09ea3c383fcc3354"
 dependencies = [
  "lkmotor-protocol",
  "log",
@@ -1769,7 +1769,7 @@ dependencies = [
 [[package]]
 name = "lkmotor-protocol"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#ef557f0e97c5fb915c345ebed1c2be16aec57218"
+source = "git+https://github.com/takarakasai/misa-actuator.git#1b462d3aa2a822e77b64828e09ea3c383fcc3354"
 
 [[package]]
 name = "lock_api"
@@ -1865,7 +1865,7 @@ dependencies = [
 [[package]]
 name = "misa-actuator"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-actuator.git#ef557f0e97c5fb915c345ebed1c2be16aec57218"
+source = "git+https://github.com/takarakasai/misa-actuator.git#1b462d3aa2a822e77b64828e09ea3c383fcc3354"
 dependencies = [
  "log",
  "thiserror 2.0.20",
