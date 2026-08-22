@@ -170,9 +170,17 @@ fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let bus = LegBus::open_alone(&cfg.hardware, leg).map_err(|e| e.to_string())?;
     let before = measure_one(&bus, k)?;
 
-    // ゼロ出しは全軸に効く（`rezero` は軸ごとだが要求は 3 軸まとめ）。
-    // 位置指令にはアンカーが要るのでここで一度置く。
-    bus.request(BusRequest::Zero).map_err(|e| e.to_string())?;
+    // マルチターンフレームは起動時に自動で確立されるので、ここで置き直す
+    // 必要は無い。念のため確立を待つだけにする。
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !bus.is_anchored() {
+        if Instant::now() >= deadline {
+            return Err("マルチターンフレームを確立できません\
+                        （モータ電源とボーレートを確認してください）"
+                .into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     std::thread::sleep(SETTLE);
     bus.request(BusRequest::EnableJoint(k))
         .map_err(|e| e.to_string())?;
@@ -228,12 +236,19 @@ fn jog_once(
     delta_rad: f64,
     speed: f64,
 ) -> Result<(f64, f64), String> {
-    // ゼロ出し直後なので、モータ座標の 0 が「今いるところ」。
-    // モデル座標の目標は `sign * delta + zero_pose` で表される点だが、
-    // sign を決めるのが目的なのでここでは設定の sign をそのまま使う
-    // （+1 と仮定して動かし、実際にどちらへ動いたかを人が見る）。
+    // **現在位置からの相対移動**として目標を組む。
+    //
+    // モータ座標で +delta 動かしたいので、モデル座標では sign を掛けて足す。
+    // sign を決めるのが目的なので設定値をそのまま使う（そのつもりで動かし、
+    // 実際にどちらへ動いたかを人が見る）。
+    //
+    // **かつては `sign * delta + zero_pose_rad` と書いていた。** `rezero` で
+    // 「今いるところ」がモータ座標の 0 になる前提だったが、位置の基準を
+    // モータの電源 ON マルチターンフレームへ移した時点でその前提は消えた。
+    // 絶対座標の一点を指すので、原点姿勢から離れているほど大きく動く
+    // （実測で 73° 動く条件があった）。可動域クランプは ±145° なので止まらない。
     let map = &cfg.hardware.legs.bus[bus_index(&cfg.hardware, bus.leg())?].motors[k];
-    let target = map.sign * delta_rad + map.zero_pose_rad;
+    let target = before + map.sign * delta_rad;
 
     let mut cmds = [JointCommand::default(); 3];
     cmds[k] = JointCommand {
