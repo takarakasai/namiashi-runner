@@ -189,7 +189,8 @@ fn channel_roles(t: &TeleopConfig) -> [&'static str; CHANNELS] {
         (t.mode.channel, "モード"),
         (t.gait.channel, "歩容"),
         (t.pose.channel, "ポーズ"),
-        (t.chicken_head.channel, "チキン"),
+        (t.pose_select.channel, "振る足"),
+        (t.chicken_head.channel, "姿勢"),
     ];
     if let Some(arm) = &t.arm {
         assign.push((arm.channel, "腕"));
@@ -255,12 +256,20 @@ fn monitor_lines(
         "  vx={:+.3} m/s   vy={:+.3} m/s   wz={:+.3} rad/s   高さ={:+.3} m",
         cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s, cmd.height_offset_m
     ));
+    // **姿勢モードが on の間、vy と高さは 0 になり、代わりに roll/pitch が出る。**
+    // 上の行だけ見ていると「スティックを倒しているのに vy が 0」で悩む。
     out.push(format!(
-        "  モード={:?}   歩容={}   ポーズ={}   チキンヘッド={}   腕={}",
+        "  姿勢={}   roll={:+.3} rad   pitch={:+.3} rad",
+        if cmd.chicken_head { "on" } else { "off" },
+        cmd.body_attitude_rad[0],
+        cmd.body_attitude_rad[1]
+    ));
+    out.push(format!(
+        "  モード={:?}   歩容={}   ポーズ={}   振る足={}   腕={}",
         cmd.mode,
         cmd.gait.label(),
         if cmd.play_pose { "再生" } else { "-" },
-        if cmd.chicken_head { "on" } else { "off" },
+        if cmd.play_alt { "alt" } else { "既定" },
         match cmd.arm_rad {
             Some(q) => format!("{q:+.3}rad"),
             None => "-".to_string(),
@@ -277,8 +286,8 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
         .map(|(i, v)| format!("{}:{v:>4}", i + 1))
         .collect();
     format!(
-        "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} chicken={} \
-         arm={} {} {} {:.0}fps frames={} desync={}",
+        "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} alt={} \
+         att={}({:+.3},{:+.3}) arm={} {} {} {:.0}fps frames={} desync={}",
         raw.join(" "),
         cmd.vx_m_s,
         cmd.vy_m_s,
@@ -287,7 +296,10 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
         cmd.mode,
         cmd.gait.label(),
         cmd.play_pose,
+        cmd.play_alt,
         cmd.chicken_head,
+        cmd.body_attitude_rad[0],
+        cmd.body_attitude_rad[1],
         match cmd.arm_rad {
             Some(q) => format!("{q:+.3}rad"),
             None => "-".to_string(),
