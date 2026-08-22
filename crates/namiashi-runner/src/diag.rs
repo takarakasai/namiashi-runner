@@ -628,7 +628,7 @@ fn print_teleop(t: &TeleopConfig) {
         t.vx.channel, t.vy.channel, t.wz.channel, t.height.channel
     );
     println!(
-        "  CH{} モード(脱力/起立/歩行)  CH{} 歩容(Crawl/Walk/Trot)  \
+        "  CH{} モード(脱力/初期姿勢/歩行)  CH{} 歩容(Crawl/Walk/Trot)  \
          CH{} ポーズ再生  CH{} チキンヘッド",
         t.mode.channel, t.gait.channel, t.pose.channel, t.chicken_head.channel
     );

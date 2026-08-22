@@ -210,7 +210,20 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
 
     while !stop.load(Ordering::Relaxed) {
         let sbus = hw.sbus.state();
-        let cmd = teleop.update(&sbus, sbus.is_usable(teleop_timeout));
+        let usable = sbus.is_usable(teleop_timeout);
+        // 受信が無いときの扱いは 2 通りあり、混ぜてはいけない。
+        //
+        // - **フェイルセーフ**（受信していたのに切れた）… 活動度を上げない。
+        //   脱力中に切れたら脱力のまま。`Teleop::update` が面倒を見る
+        // - **ベンチ**（`--allow-no-sbus`、受信機がそもそも無い）… 起立させたい
+        //
+        // かつては前者が一律 `Stand` を返しており、後者はそれに乗っかって
+        // いた。結果として**脱力中に受信が切れると立ち上がっていた**。
+        let cmd = if !usable && opts.allow_no_sbus {
+            teleop.bench_stand()
+        } else {
+            teleop.update(&sbus, usable)
+        };
         let imu = hw.imu.sample_or_level();
         // 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
         if let Some(observed) = cmd.arm_rad {

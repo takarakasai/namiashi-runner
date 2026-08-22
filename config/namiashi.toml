@@ -2,7 +2,7 @@
 model = "models/namiashi.misa"
 rate_hz = 200.0
 transition_s = 1.5
-start_pose = "constrain"
+start_pose = "start"
 kinematics_pose = "extend"
 teleop_timeout_ms = 100
 
@@ -14,6 +14,7 @@ max_vy_m_s = 0.08
 max_wz_rad_s = 0.6
 height_range_m = 0.04
 crawl_use_linear = false
+velocity_ramp_s = 0.5
 
 [teleop.vx]
 channel = 2

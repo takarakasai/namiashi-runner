@@ -158,6 +158,15 @@ pub struct GaitTuning {
     /// 前進しか扱わない）。直進の安定性を追い込むときだけ使う。
     #[serde(default)]
     pub crawl_use_linear: bool,
+    /// 速度指令を 0 から最大まで振り切るのにかける時間 [s]。0 でランプ無し。
+    ///
+    /// **歩容はスティックが動いた瞬間に出力を階段状に飛ばす。** 実測で
+    /// 制御 1 周期あたり Crawl 31.5 / Walk 23.0 / Trot 9.9 rad/s
+    /// （Crawl は 5 ms で 9.0°）。2 tick 目以降は滑らかなので跳ぶのは
+    /// 切り替わりの 1 点だけで、スティック側を鈍らせれば消える
+    /// （0.5 s のランプで Crawl 31.5 → 3.34 rad/s）。
+    #[serde(default = "default_velocity_ramp_s")]
+    pub velocity_ramp_s: f64,
     /// 歩容種別ごとの周期 (s)。指定が無ければ `quadruped-gait` のプリセット値。
     #[serde(default)]
     pub crawl_cycle_s: Option<f64>,
@@ -183,6 +192,10 @@ fn default_max_vy() -> f64 {
 fn default_max_wz() -> f64 {
     0.6
 }
+fn default_velocity_ramp_s() -> f64 {
+    0.5
+}
+
 fn default_height_range() -> f64 {
     0.04
 }
@@ -197,6 +210,7 @@ impl Default for GaitTuning {
             max_wz_rad_s: default_max_wz(),
             height_range_m: default_height_range(),
             crawl_use_linear: false,
+            velocity_ramp_s: default_velocity_ramp_s(),
             crawl_cycle_s: None,
             walk_cycle_s: None,
             trot_cycle_s: None,

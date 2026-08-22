@@ -34,6 +34,11 @@ pub enum State {
     Relaxed,
     /// 初期姿勢（`control.start_pose`）へ遷移中。
     GoingToStart,
+    /// 初期姿勢で保持。**通電したまま止まっている。**
+    ///
+    /// 試合はこの姿勢でスタートボックスに置いて合図を待つ。CH5 の中段が
+    /// ここで、上段（歩行）へ倒すと立ち姿勢を経て歩容に入る。
+    HoldingStart,
     /// 歩容の立ち姿勢へ遷移中。
     GoingToStance,
     /// 歩容が動いている（速度ゼロなら立ったまま）。
@@ -47,6 +52,7 @@ impl State {
         match self {
             State::Relaxed => "脱力",
             State::GoingToStart => "初期姿勢へ",
+            State::HoldingStart => "初期姿勢",
             State::GoingToStance => "立ち姿勢へ",
             State::Active => "歩容",
             State::PlayingPose => "ポーズ再生",
@@ -88,6 +94,16 @@ pub struct Controller {
     /// 胴体高さ変更が効かないことを 1 度だけ警告するためのフラグ。
     /// 歩容を切り替えたら出し直す。
     warned_body_height: bool,
+    /// ランプ後の速度指令 `[vx, vy, wz]`。歩容へ渡すのはこちら。
+    ///
+    /// **スティックの値を直接渡すと歩容の出力が階段状に飛ぶ**（実測で
+    /// 制御 1 周期あたり Crawl 31.5 rad/s = 5 ms で 9.0°）。歩容自体は
+    /// 2 tick 目以降は滑らかなので、跳ぶのは切り替わりの 1 点だけ。
+    /// ここで鈍らせれば消える。
+    ramped_v: [f64; 3],
+    /// 停止指令を受けてから全脚接地を待っている時間 [s]。
+    /// 待ちが終わらないまま歩き続けないための保険。
+    settling_s: f64,
     /// 直近の歩容出力から取った胴体姿勢と接地。可視化にだけ使う。
     ///
     /// 歩容を回していない状態（遷移中・ポーズ再生中）でも姿勢を描きたいので、
@@ -121,6 +137,8 @@ impl Controller {
             just_changed: false,
             warned_chicken_head: false,
             warned_body_height: false,
+            ramped_v: [0.0; 3],
+            settling_s: 0.0,
             body_view: BodyView::default(),
         }
     }
@@ -175,7 +193,8 @@ impl Controller {
 
         match self.state {
             State::Relaxed => self.tick_relaxed(cmd, measured),
-            State::GoingToStart => self.tick_transition(dt, State::GoingToStance),
+            State::GoingToStart => self.tick_going_to_start(cmd, dt),
+            State::HoldingStart => self.tick_holding_start(cmd),
             State::GoingToStance => self.tick_transition(dt, State::Active),
             State::Active => self.tick_active(cmd, imu, dt),
             State::PlayingPose => self.tick_pose(cmd, dt),
@@ -222,6 +241,74 @@ impl Controller {
         }
     }
 
+    /// 初期姿勢へ向かう遷移。着いたら**保持**する（歩行要求があれば通す）。
+    fn tick_going_to_start(&mut self, cmd: &OperatorCommand, dt: f64) {
+        let done = match self.player.as_mut() {
+            Some(player) => {
+                self.targets = player.tick(dt);
+                player.is_done()
+            }
+            None => true,
+        };
+        if !done {
+            return;
+        }
+        self.player = None;
+        if cmd.mode == ModeRequest::Walk {
+            self.begin_stance_transition();
+        } else {
+            self.state = State::HoldingStart;
+        }
+    }
+
+    /// 初期姿勢で保持。歩行要求で立ち姿勢へ。
+    ///
+    /// **目標は動かさない。** 脱力要求は [`Self::tick`] の共通処理が拾う。
+    fn tick_holding_start(&mut self, cmd: &OperatorCommand) {
+        // 腕を駆動できない構成では、目標にも観測値を置いて食い違わせない。
+        if !self.arm_app_driven {
+            if let Some(observed) = cmd.arm_rad {
+                self.targets.arm = observed;
+            }
+        }
+        if cmd.mode == ModeRequest::Walk {
+            self.begin_stance_transition();
+        }
+    }
+
+    /// いまの目標から歩容の立ち姿勢へ向かう遷移を張る。
+    fn begin_stance_transition(&mut self) {
+        let stance = self.stance_targets();
+        self.player = Some(PosePlayer::to_pose(
+            self.targets,
+            stance,
+            self.cfg.control.transition_s,
+            InterpolationKind::QuinticSmooth,
+        ));
+        self.state = State::GoingToStance;
+    }
+
+    /// いまの目標から初期姿勢へ戻る遷移を張る。歩行 → 中段で使う。
+    fn begin_start_pose_transition(&mut self) {
+        let start = match self.robot.poses.pose(&self.cfg.control.start_pose) {
+            Some(p) => self.robot.poses.resolve(&p.angles, self.targets),
+            None => {
+                log::warn!(
+                    "初期姿勢 {:?} がモデルにありません。立ち姿勢のまま保持します",
+                    self.cfg.control.start_pose
+                );
+                return;
+            }
+        };
+        self.player = Some(PosePlayer::to_pose(
+            self.targets,
+            start,
+            self.cfg.control.transition_s,
+            InterpolationKind::QuinticSmooth,
+        ));
+        self.state = State::GoingToStart;
+    }
+
     /// 遷移中。終わったら `next` へ。
     fn tick_transition(&mut self, dt: f64, next: State) {
         let done = match self.player.as_mut() {
@@ -260,6 +347,13 @@ impl Controller {
             self.start_pose_playback();
             return;
         }
+        // CH5 を中段へ戻したら初期姿勢へ帰る。**歩容を抜ける唯一の道**
+        // （脱力は共通処理が拾う）。速度ゼロで立ち続けたいなら上段のまま
+        // スティックを中立にすればよい。
+        if cmd.mode == ModeRequest::Stand {
+            self.begin_start_pose_transition();
+            return;
+        }
         // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす。
         // **ただし受け付けるのは LinearCrawl だけ**（`gait_supports_body_height`）。
         // 他の歩容では `set_body_height_m` が黙って捨てるので、動かしても
@@ -275,17 +369,20 @@ impl Controller {
             ))
         {
             log::warn!(
-                "歩容 {} は実行中の胴体高さ変更を受け付けません（CH3 は効きません）。                 受け付けるのは LinearCrawl のみで、そちらは横移動と旋回を受け付けません。                 高さを変えるなら設定の gait.stance_height_m を変えて起動し直してください",
+                "歩容 {} は実行中の胴体高さ変更を受け付けません（CH3 は効きません）。\
+                 受け付けるのは LinearCrawl のみで、そちらは横移動と旋回を受け付けません。\
+                 高さを変えるなら設定の gait.stance_height_m を変えて起動し直してください",
                 self.gait_select.label()
             );
             self.warned_body_height = true;
         }
-        let v = match cmd.mode {
-            ModeRequest::Walk => velocity_cmd(cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s),
+        let want = match cmd.mode {
+            ModeRequest::Walk => [cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s],
             // 起立中は歩容を止める（速度ゼロ = 接地したまま）。
-            _ => velocity_cmd(0.0, 0.0, 0.0),
+            _ => [0.0; 3],
         };
-        self.gait.set_velocity_cmd(v);
+        let v = self.ramp_velocity(want, dt);
+        self.gait.set_velocity_cmd(velocity_cmd(v[0], v[1], v[2]));
         self.gait
             .set_body_attitude_observed(imu.rpy_rad[0], imu.rpy_rad[1]);
         let out = self.gait.tick(dt);
@@ -375,6 +472,8 @@ impl Controller {
         self.player = None;
         self.state = State::Relaxed;
         self.chicken.reset();
+        // 次に立ち上がったとき、前回の速度から歩き出さないように。
+        self.ramped_v = [0.0; 3];
     }
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
@@ -383,6 +482,55 @@ impl Controller {
         self.gait.set_velocity_cmd(velocity_cmd(0.0, 0.0, 0.0));
         let out = self.gait.tick(0.0);
         self.robot.output_to_joints(&out, self.targets.arm)
+    }
+
+    /// 速度指令を `gait.velocity_ramp_s` で鈍らせる。
+    ///
+    /// 各軸の上限レートは「その軸の最大値 ÷ ランプ時間」なので、**どの軸も
+    /// 全開から中立まで同じ時間**で戻る。歩き出す側だけでなく**止まる側にも
+    /// 同じレートがかかる**（実測では止まるときも 27.9 rad/s 跳んでいた）。
+    fn ramp_velocity(&mut self, want: [f64; 3], dt: f64) -> [f64; 3] {
+        let ramp_s = self.cfg.gait.velocity_ramp_s;
+        if ramp_s <= 0.0 || dt <= 0.0 {
+            self.ramped_v = want;
+            return want;
+        }
+        let full = [
+            self.cfg.gait.max_vx_m_s,
+            self.cfg.gait.max_vy_m_s,
+            self.cfg.gait.max_wz_rad_s,
+        ];
+        for k in 0..3 {
+            let step = (full[k].abs() / ramp_s) * dt;
+            let d = (want[k] - self.ramped_v[k]).clamp(-step, step);
+            self.ramped_v[k] += d;
+        }
+
+        // **歩容は速度ちょうど 0 で静止姿勢へ分岐する。** 遊脚がある瞬間に
+        // 0 を渡すと、その脚を一気に接地位置へ引き戻して目標が跳ぶ
+        // （実測 35.4 rad/s = 制御 1 周期で 10.2°）。ランプだけでは消えず、
+        // 跳ぶ時刻がランプ終了へ移るだけだった。0.001 m/s を渡し続けた
+        // 場合は 3.34 rad/s で収まる ＝ **跳びの原因は 0 への分岐そのもの**。
+        //
+        // なので全脚が接地している瞬間まで微速で歩かせ、そこで 0 に落とす。
+        const CREEP_M_S: f64 = 1e-3;
+        const SETTLE_TIMEOUT_S: f64 = 2.0;
+        let stopping = want.iter().all(|v| *v == 0.0);
+        let nearly_stopped = self.ramped_v.iter().all(|v| v.abs() <= CREEP_M_S);
+        if stopping && nearly_stopped {
+            // 接地フラグは前周期の歩容出力（`body_view`）から取る。
+            let all_stance = self.body_view.stance.iter().all(|&s| s);
+            if all_stance || self.settling_s >= SETTLE_TIMEOUT_S {
+                self.settling_s = 0.0;
+                self.ramped_v = [0.0; 3];
+                return self.ramped_v;
+            }
+            // 待っている間だけ微速。**保持しない**ので、接地した次の周期で 0 になる。
+            self.settling_s += dt;
+            return [CREEP_M_S, 0.0, 0.0];
+        }
+        self.settling_s = 0.0;
+        self.ramped_v
     }
 
     fn set_gait(&mut self, select: GaitSelect) {
@@ -437,6 +585,77 @@ mod tests {
     }
 
     /// 状態が `want` になるまで回す。回りすぎたら失敗。
+    /// 停止 ↔ 歩行の切り替わりで目標角が跳ばないこと。
+    ///
+    /// **歩容は速度指令が変わった瞬間に出力を階段状に飛ばす。** ランプ無しの
+    /// 実測は制御 1 周期（5 ms）あたり Crawl 31.5 / Walk 23.0 / Trot 9.9 rad/s
+    /// で、Crawl は 1 周期で 9.0° 飛んでいた。2 tick 目以降は滑らかなので、
+    /// 跳ぶのは切り替わりの 1 点だけ。
+    #[test]
+    fn starting_and_stopping_a_walk_does_not_step_the_targets() {
+        let dt = 0.005;
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            let mut c = controller();
+            let mut stand = cmd(ModeRequest::Walk);
+            stand.gait = select;
+            run_until(&mut c, &stand, State::Active, 20.0);
+            let mut prev = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+
+            let mut go = stand;
+            go.vx_m_s = 0.10;
+            let mut worst: f64 = 0.0;
+            // 歩き出して、また止まる。**両側に跳びがある。**
+            for phase in [go, stand] {
+                for _ in 0..400 {
+                    let q = c.tick(&phase, &JointVec::zeros(), &imu(), dt).targets;
+                    for l in 0..4 {
+                        for k in 0..3 {
+                            worst = worst.max((q.legs[l][k] - prev.legs[l][k]).abs() / dt);
+                        }
+                    }
+                    prev = q;
+                }
+            }
+            // ランプと全脚接地待ちを入れて 3.3〜5.4 rad/s。無しでは 9.9〜31.5。
+            assert!(
+                worst < 6.0,
+                "{} で目標が {:.2} rad/s 跳んだ（{:.1}°/周期）",
+                select.label(),
+                worst,
+                (worst * dt).to_degrees()
+            );
+        }
+    }
+
+    /// ランプは止まる側にもかかる。片側だけでは足りない。
+    #[test]
+    fn the_velocity_ramp_applies_in_both_directions() {
+        let mut cfg = AppConfig::default();
+        cfg.gait.velocity_ramp_s = 0.5;
+        let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+        let mut c = Controller::new(robot, cfg);
+        let dt = 0.01;
+        let mut go = cmd(ModeRequest::Walk);
+        go.vx_m_s = 0.15;
+        run_until(&mut c, &go, State::Active, 20.0);
+        // 全開まで 0.5 s かかる → 0.1 s 時点では半分にも達していない。
+        let mut c2 = controller();
+        run_until(&mut c2, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        for _ in 0..10 {
+            c2.tick(&go, &JointVec::zeros(), &imu(), dt);
+        }
+        assert!(
+            c2.ramped_v[0] < 0.15 * 0.5,
+            "0.1 s で {:.3} m/s まで来ている（ランプが効いていない）",
+            c2.ramped_v[0]
+        );
+        // 中立へ戻すときも同じレート。
+        let before = c2.ramped_v[0];
+        c2.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), dt);
+        assert!(c2.ramped_v[0] < before);
+        assert!(c2.ramped_v[0] > 0.0, "1 周期で 0 まで落ちている");
+    }
+
     fn run_until(c: &mut Controller, command: &OperatorCommand, want: State, max_s: f64) {
         let dt = 0.005;
         let mut t = 0.0;
@@ -471,7 +690,7 @@ mod tests {
     #[test]
     fn standing_goes_through_the_start_pose_then_the_stance() {
         let mut c = controller();
-        let stand = cmd(ModeRequest::Stand);
+        let stand = cmd(ModeRequest::Walk);
         c.tick(&stand, &JointVec::zeros(), &imu(), 0.005);
         assert_eq!(c.state(), State::GoingToStart);
         run_until(&mut c, &stand, State::GoingToStance, 10.0);
@@ -486,7 +705,7 @@ mod tests {
     fn the_start_pose_is_actually_reached_before_the_stance_transition() {
         let cfg = AppConfig::default();
         let mut c = controller();
-        let stand = cmd(ModeRequest::Stand);
+        let stand = cmd(ModeRequest::Walk);
         run_until(&mut c, &stand, State::GoingToStance, 10.0);
         // GoingToStance に入った時点の目標は start_pose と一致しているはず。
         let start = c
@@ -502,10 +721,70 @@ mod tests {
         );
     }
 
+    /// CH5 中段は**初期姿勢で止まる**。立ち姿勢まで行かない。
+    ///
+    /// 試合はこの姿勢でスタートボックスに置いて合図を待つ。
+    #[test]
+    fn the_middle_switch_position_holds_the_start_pose() {
+        let mut c = controller();
+        run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
+        let held = c
+            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005)
+            .targets;
+        // 通電したまま保持する。**脱力しない。**
+        let out = c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005);
+        assert_eq!(out.state, State::HoldingStart);
+        assert_eq!(out.leg_mode, JointMode::Position);
+        // 何周期回しても動かない。
+        for _ in 0..200 {
+            c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005);
+        }
+        let still = c
+            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005)
+            .targets;
+        assert!(
+            still.max_abs_diff(&held) < 1e-9,
+            "初期姿勢で保持できていない"
+        );
+        // 保持しているのは設定の初期姿勢そのもの。
+        let want = {
+            let p = c.robot.poses.pose(&c.cfg.control.start_pose).unwrap();
+            c.robot.poses.resolve(&p.angles, JointVec::zeros())
+        };
+        assert!(
+            held.max_abs_diff(&want) < 1e-6,
+            "初期姿勢と違う姿勢で止まっている"
+        );
+    }
+
+    /// 中段 → 上段で歩容へ、上段 → 中段で初期姿勢へ戻る。
+    #[test]
+    fn the_switch_walks_from_the_start_pose_and_returns_to_it() {
+        let mut c = controller();
+        run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        // 上段のままスティック中立なら、立ち姿勢で止まっていられる。
+        for _ in 0..100 {
+            assert_eq!(
+                c.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), 0.005)
+                    .state,
+                State::Active
+            );
+        }
+        // 中段へ戻すと初期姿勢へ帰る。
+        run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
+    }
+
     #[test]
     fn relax_takes_effect_from_any_state() {
         let mut c = controller();
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), &imu(), 0.005);
+        assert_eq!(out.state, State::Relaxed);
+        assert_eq!(out.leg_mode, JointMode::Idle);
+        // 初期姿勢の保持中からも同じ。
+        let mut c = controller();
+        run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
         let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), &imu(), 0.005);
         assert_eq!(out.state, State::Relaxed);
         assert_eq!(out.leg_mode, JointMode::Idle);
@@ -514,9 +793,9 @@ mod tests {
     #[test]
     fn walking_forward_moves_the_legs() {
         let mut c = controller();
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let stance = c
-            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.0)
+            .tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), 0.0)
             .targets;
         let mut walk = cmd(ModeRequest::Walk);
         walk.vx_m_s = 0.1;
@@ -539,7 +818,7 @@ mod tests {
         assert_eq!(c.gait_select(), GaitSelect::Trot);
 
         // 起立の途中も Trot のまま要求し続ける（遷移中の切り替えは許される）。
-        let mut stand_trot = cmd(ModeRequest::Stand);
+        let mut stand_trot = cmd(ModeRequest::Walk);
         stand_trot.gait = GaitSelect::Trot;
         run_until(&mut c, &stand_trot, State::Active, 20.0);
         assert_eq!(c.gait_select(), GaitSelect::Trot);
@@ -557,8 +836,8 @@ mod tests {
         cfg.poses.greeting = "no_such_pose".into();
         let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
         let mut c = Controller::new(robot, cfg);
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
-        let mut play = cmd(ModeRequest::Stand);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut play = cmd(ModeRequest::Walk);
         play.play_pose = true;
         let out = c.tick(&play, &JointVec::zeros(), &imu(), 0.005);
         assert_eq!(out.state, State::Active);
@@ -568,8 +847,8 @@ mod tests {
     fn a_non_driven_arm_follows_the_observed_angle_not_the_chicken_head() {
         // 受信機直結（既定）。チキンヘッドを ON にしても腕の目標は観測値のまま。
         let mut c = controller();
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
-        let mut with_arm = cmd(ModeRequest::Stand);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut with_arm = cmd(ModeRequest::Walk);
         with_arm.chicken_head = true;
         with_arm.arm_rad = Some(-0.7);
         let pitched = ImuSample {
@@ -592,8 +871,8 @@ mod tests {
         let cfg = AppConfig::default();
         let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
         let mut c = Controller::with_arm(robot, cfg, true);
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
-        let mut on = cmd(ModeRequest::Stand);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut on = cmd(ModeRequest::Walk);
         on.chicken_head = true;
         let pitched = ImuSample {
             rpy_rad: [0.0, 0.4, 0.0],
@@ -614,12 +893,12 @@ mod tests {
     #[test]
     fn a_non_driven_arm_holds_its_last_value_when_the_link_is_lost() {
         let mut c = controller();
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
-        let mut seen = cmd(ModeRequest::Stand);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut seen = cmd(ModeRequest::Walk);
         seen.arm_rad = Some(0.3);
         c.tick(&seen, &JointVec::zeros(), &imu(), 0.005);
         // 受信断で観測値が無くなっても 0 へ飛ばない。
-        let lost = OperatorCommand::failsafe(GaitSelect::Crawl);
+        let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Stand);
         let out = c.tick(&lost, &JointVec::zeros(), &imu(), 0.005);
         assert!((out.targets.arm - 0.3).abs() < 1e-9, "{}", out.targets.arm);
     }
@@ -631,13 +910,13 @@ mod tests {
         cfg.poses.greeting = "jump".into();
         let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
         let mut c = Controller::new(robot, cfg);
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
-        let mut play = cmd(ModeRequest::Stand);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut play = cmd(ModeRequest::Walk);
         play.play_pose = true;
         assert_eq!(
             c.tick(&play, &JointVec::zeros(), &imu(), 0.005).state,
             State::PlayingPose
         );
-        run_until(&mut c, &cmd(ModeRequest::Stand), State::Active, 20.0);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
     }
 }

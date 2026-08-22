@@ -259,14 +259,31 @@ impl TeleopConfig {
 }
 
 /// 動作モードの要求。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 並び順が**活動度の低い順**になっていることに意味がある。受信が切れた
+/// ときのフェイルセーフは、この順序で**直前より上へ行かない**ことを保証する
+/// （[`Self::capped_for_failsafe`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModeRequest {
     /// 脱力。
     Relax,
-    /// 起立して姿勢を保つ。
+    /// 初期姿勢で保持。
     Stand,
     /// 歩行。
     Walk,
+}
+
+impl ModeRequest {
+    /// 受信が切れたときに落とし込む先。**活動度を上げない。**
+    ///
+    /// | 直前 | 受信断後 | 理由 |
+    /// |---|---|---|
+    /// | `Relax` | `Relax` | **脱力中に受信が切れて立ち上がるのは危ない** |
+    /// | `Stand` | `Stand` | そのまま保持 |
+    /// | `Walk` | `Stand` | 速度は 0 にするが**脱力はしない**。荷重がかかった状態で崩れる |
+    pub fn capped_for_failsafe(self) -> Self {
+        self.min(ModeRequest::Stand)
+    }
 }
 
 /// 歩容の選択。
@@ -313,7 +330,12 @@ impl OperatorCommand {
     /// **速度は 0、モードは Stand。** 脱力にしないのは、立っている四足を
     /// 脱力させると倒れるから。受信が戻るまでその場で立ち続けるのが、
     /// 電波が切れたときにいちばん壊れない。
-    pub fn failsafe(gait: GaitSelect) -> Self {
+    /// 受信が切れたときの指令。速度はゼロ、モードは `mode`。
+    ///
+    /// **`mode` は呼び出し側が [`ModeRequest::capped_for_failsafe`] で
+    /// 丸めた値を渡すこと。** ここで一律 `Stand` を返していた時期があり、
+    /// 脱力中に受信が切れると立ち上がっていた。
+    pub fn failsafe(gait: GaitSelect, mode: ModeRequest) -> Self {
         Self {
             vx_m_s: 0.0,
             vy_m_s: 0.0,
@@ -322,7 +344,7 @@ impl OperatorCommand {
             // 受信が切れている間の腕の角度は分からない。直近値を握り続けると
             // 「今そこにある」と読めてしまうので、素直に不明にする。
             arm_rad: None,
-            mode: ModeRequest::Stand,
+            mode,
             gait,
             play_pose: false,
             chicken_head: false,
@@ -342,6 +364,10 @@ pub struct Teleop {
     arm_range_rad: (f64, f64),
     prev_pose_on: bool,
     last_gait: GaitSelect,
+    /// 直近に**受信できていたとき**のモード要求。
+    /// 受信断のフェイルセーフをここから頭打ちにする。初期値は最も安全な
+    /// `Relax`（一度も受信できていないなら立ち上がる理由がない）。
+    last_mode: ModeRequest,
 }
 
 impl Teleop {
@@ -359,7 +385,18 @@ impl Teleop {
             arm_range_rad: (arm.min_rad, arm.max_rad),
             prev_pose_on: false,
             last_gait: GaitSelect::Crawl,
+            last_mode: ModeRequest::Relax,
         }
+    }
+
+    /// 受信が無い状態で使う指令（`--allow-no-sbus`）。
+    ///
+    /// **フェイルセーフとは別物。** フェイルセーフは「直前より上へ行かない」
+    /// が原則なので、受信が一度も来ていなければ `Relax` のままになる。
+    /// ベンチで受信機なしに起立させたいという要求はそれとは別で、
+    /// **明示的に起立を合成する**。
+    pub fn bench_stand(&self) -> OperatorCommand {
+        OperatorCommand::failsafe(self.last_gait, ModeRequest::Stand)
     }
 
     /// 観測した腕チャンネル (-1..1) を可動域へ写す。
@@ -376,7 +413,7 @@ impl Teleop {
             // 受信が戻ったときにスイッチが押しっぱなしでも暴発しないよう、
             // 立ち上がり検出の履歴は「押されている」側に倒しておく。
             self.prev_pose_on = true;
-            return OperatorCommand::failsafe(self.last_gait);
+            return OperatorCommand::failsafe(self.last_gait, self.last_mode.capped_for_failsafe());
         }
 
         let gait = match self.cfg.gait.position(state) {
@@ -385,6 +422,13 @@ impl Teleop {
             _ => GaitSelect::Trot,
         };
         self.last_gait = gait;
+
+        let mode = match self.cfg.mode.position(state) {
+            0 => ModeRequest::Relax,
+            1 => ModeRequest::Stand,
+            _ => ModeRequest::Walk,
+        };
+        self.last_mode = mode;
 
         let pose_on = self.cfg.pose.position(state) > 0;
         let play_pose = pose_on && !self.prev_pose_on;
@@ -396,11 +440,7 @@ impl Teleop {
             wz_rad_s: self.cfg.wz.value(state) * self.max_wz,
             height_offset_m: self.cfg.height.value(state) * self.height_range,
             arm_rad: self.arm_angle(state),
-            mode: match self.cfg.mode.position(state) {
-                0 => ModeRequest::Relax,
-                1 => ModeRequest::Stand,
-                _ => ModeRequest::Walk,
-            },
+            mode,
             gait,
             play_pose,
             chicken_head: self.cfg.chicken_head.position(state) > 0,
@@ -511,14 +551,19 @@ mod tests {
         assert!(t.update(&on, true).play_pose);
     }
 
+    /// 受信断では速度を必ずゼロにする。**スティックの生値を残さない。**
+    ///
+    /// モードは直前の要求から頭打ちにするので、ここでは見ない
+    /// （[`a_lost_link_never_escalates_the_mode`] 他が受け持つ）。
+    /// **このテストはかつて `mode == Stand` を固定していた** — つまり
+    /// 「脱力中に受信が切れたら立ち上がる」というバグの方を守っていた。
     #[test]
-    fn a_lost_link_zeroes_the_velocity_and_asks_to_stand() {
+    fn a_lost_link_zeroes_the_velocity() {
         let mut t = Teleop::new(TeleopConfig::default(), &GaitTuning::default(), &arm_cfg());
         let cmd = t.update(&state_with(&[(2, RAW_MAX), (5, RAW_MAX)]), false);
         assert_eq!(cmd.vx_m_s, 0.0);
         assert_eq!(cmd.vy_m_s, 0.0);
         assert_eq!(cmd.wz_rad_s, 0.0);
-        assert_eq!(cmd.mode, ModeRequest::Stand);
         assert!(!cmd.link_ok);
     }
 
@@ -529,6 +574,55 @@ mod tests {
         // 受信断のあいだにスイッチが入ったまま復帰しても暴発しない。
         t.update(&on, false);
         assert!(!t.update(&on, true).play_pose);
+    }
+
+    /// 受信断のフェイルセーフは**活動度を上げない**。
+    ///
+    /// かつて一律 `Stand` を返していたため、**脱力中に受信が切れると
+    /// 立ち上がっていた**（実機で確認、2026-08-22）。
+    #[test]
+    fn a_lost_link_never_escalates_the_mode() {
+        assert_eq!(ModeRequest::Relax.capped_for_failsafe(), ModeRequest::Relax);
+        assert_eq!(ModeRequest::Stand.capped_for_failsafe(), ModeRequest::Stand);
+        // 歩行中に切れたら止まって保持。**脱力させてはいけない**
+        // （荷重がかかった状態で崩れる）。
+        assert_eq!(ModeRequest::Walk.capped_for_failsafe(), ModeRequest::Stand);
+    }
+
+    #[test]
+    fn a_lost_link_holds_relax_when_the_operator_had_asked_for_relax() {
+        let mut t = Teleop::new(TeleopConfig::default(), &GaitTuning::default(), &arm_cfg());
+        // 脱力を指示してから受信断。
+        let cmd = t.update(&state_with(&[(5, RAW_MIN)]), true);
+        assert_eq!(cmd.mode, ModeRequest::Relax);
+        let lost = t.update(&state_with(&[(5, RAW_MIN)]), false);
+        assert_eq!(
+            lost.mode,
+            ModeRequest::Relax,
+            "脱力中の受信断で立ち上がった"
+        );
+        assert_eq!(lost.vx_m_s, 0.0);
+    }
+
+    #[test]
+    fn a_lost_link_stops_a_walk_without_relaxing() {
+        let mut t = Teleop::new(TeleopConfig::default(), &GaitTuning::default(), &arm_cfg());
+        let cmd = t.update(&state_with(&[(5, RAW_MAX), (2, RAW_MAX)]), true);
+        assert_eq!(cmd.mode, ModeRequest::Walk);
+        assert!(cmd.vx_m_s > 0.0);
+        let lost = t.update(&state_with(&[(5, RAW_MAX), (2, RAW_MAX)]), false);
+        assert_eq!(lost.mode, ModeRequest::Stand);
+        assert_eq!(lost.vx_m_s, 0.0);
+    }
+
+    /// 一度も受信できていなければ `Relax` のまま。**起立させる理由がない。**
+    #[test]
+    fn a_link_that_never_worked_stays_relaxed() {
+        let mut t = Teleop::new(TeleopConfig::default(), &GaitTuning::default(), &arm_cfg());
+        let lost = t.update(&state_with(&[(5, RAW_MAX)]), false);
+        assert_eq!(lost.mode, ModeRequest::Relax);
+        // ベンチ用の合成指令だけが明示的に起立する。
+        assert_eq!(t.bench_stand().mode, ModeRequest::Stand);
     }
 
     #[test]
