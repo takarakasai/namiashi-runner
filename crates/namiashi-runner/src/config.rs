@@ -108,6 +108,31 @@ pub struct ControlConfig {
     /// `constrain` にしてある（脚を伸ばしたまま起動するより安全側）。
     #[serde(default = "default_start_pose")]
     pub start_pose: String,
+    /// 電源投入後の初回起動で、**いまの姿勢をマルチターン原点に張り直す**か。
+    ///
+    /// # 何のためにあるのか
+    ///
+    /// 角度規約は `q_model = sign * q_motor + zero_pose_rad` で、**モータ角 0 が
+    /// 伏せ姿勢**と決めてある。モータのマルチターンカウンタは電源投入で 0 に
+    /// なるので、本来は「伏せ姿勢でモータ電源を入れる」だけで原点が揃う。
+    ///
+    /// ところが SBC はモータと同じ電源から作っているので、電源投入の瞬間は
+    /// SBC のブート中で、操縦者がまだロボットを置いている最中かもしれない。
+    /// 原点が決まる瞬間を人が狙えない。これを有効にすると、原点が決まる瞬間が
+    /// **制御ループ開始の直前・脱力が確認できている時点**に移る。
+    ///
+    /// # 危険と、その封じ方
+    ///
+    /// このコマンドは**そのときの姿勢を無条件に原点にする**。立脚中に実行すれば
+    /// 立脚姿勢が伏せ扱いになり、12 軸すべての `zero_pose_rad` が無効になる。
+    ///
+    /// したがって**電源投入後の初回起動でしか実行しない**。目印を
+    /// `/dev/shm`（tmpfs。再起動で必ず消える）に置いて判定する。試合中に
+    /// クラッシュしてサービスが再起動しても、そこでは張り直さない。
+    /// SBC とモータが同じ電源なので「再起動で消える」＝「モータ電源が
+    /// 入り直した」と一致する。**電源系統を分けたらこの前提は崩れる。**
+    #[serde(default)]
+    pub zero_multiturn_on_boot: bool,
     /// 脚の運動学を自動検出するときに使う「立った姿勢」の名前。
     ///
     /// この姿勢での順運動学から公称の脚の高さが決まるので、脚を伸ばし切った
@@ -147,6 +172,9 @@ impl Default for ControlConfig {
             rate_hz: default_rate_hz(),
             transition_s: default_transition_s(),
             start_pose: default_start_pose(),
+            // 既定は false。**姿勢を無条件に原点にする**副作用があるので、
+            // 明示的に書いた設定でだけ有効になるようにしてある。
+            zero_multiturn_on_boot: false,
             kinematics_pose: default_kinematics_pose(),
             teleop_timeout_ms: default_teleop_timeout_ms(),
         }

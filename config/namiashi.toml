@@ -3,6 +3,14 @@ model = "models/namiashi.misa"
 rate_hz = 200.0
 transition_s = 1.5
 start_pose = "start"
+
+# 電源投入後の初回起動で、いまの姿勢をマルチターン原点に張り直す。
+#
+# **起動時にロボットが伏せ姿勢であることが前提。** 立脚中に効くと
+# zero_pose_rad 12 軸が全部無効になるので、電源投入後の 1 回だけに
+# 限ってある（目印は /dev/shm、再起動で消える）。試合中にサービスが
+# 再起動しても張り直さない。
+zero_multiturn_on_boot = true
 kinematics_pose = "extend"
 teleop_timeout_ms = 100
 

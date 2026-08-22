@@ -110,6 +110,56 @@ pub const RETRYABLE: &str = "[retryable] ";
 /// 0.35 rad (20°)。伏せと立脚では thigh/calf が 1.0〜1.4 rad 違うので、
 /// 「別の姿勢で電源が入った」ケースとは明確に分かれる。一方、伏せ姿勢を
 /// 手で作るときのばらつきはこれより十分小さい。
+/// 電源投入後の初回起動でだけ、いまの姿勢をマルチターン原点にする。
+///
+/// 意図と危険は [`crate::config::ControlConfig::zero_multiturn_on_boot`] を見ること。
+/// ここでは「一度きり」をどう保証しているかだけ書く。
+fn zero_multiturn_once(cfg: &AppConfig, hw: &Hardware) -> Result<(), String> {
+    /// tmpfs で 1777。**再起動で必ず消える**のがこの仕組みの土台。
+    /// `/run` は root:root 755 でサービスユーザ（takara）が書けない。
+    /// `/tmp` はディスク上のこともあり、再起動で消える保証がない。
+    const MARKER: &str = "/dev/shm/namiashi-multiturn-zeroed";
+    const SETTLE: Duration = Duration::from_millis(300);
+
+    if !cfg.control.zero_multiturn_on_boot {
+        return Ok(());
+    }
+    if std::path::Path::new(MARKER).exists() {
+        log::info!(
+            "マルチターン原点は今回の電源投入で既に張り直し済みです。\
+             いまの原点をそのまま使います（目印 {MARKER}）"
+        );
+        return Ok(());
+    }
+
+    // **目印を先に作る。** 後だと、張り直しに失敗した回や、この直後に
+    // 落ちた回で目印が残らず、次の再起動で**立脚中に張り直してしまう**。
+    // 作れなかったら「一度きり」を保証できないので、モータには触らずに諦める。
+    std::fs::File::create(MARKER)
+        .map_err(|e| format!("{MARKER} を作れません: {e}（一度きりを保証できないので中止します）"))?;
+
+    log::warn!(
+        "**いまの姿勢をマルチターン原点にします。**（電源投入後の初回起動）\
+         伏せ姿勢であることを前提にしています。違う姿勢なら、いますぐ Ctrl-C か\
+         電源を切って、伏せ姿勢にしてからやり直してください"
+    );
+    hw.legs
+        .request_all(BusRequest::ClearMultiTurn)
+        .map_err(|e| format!("マルチターン原点の張り直しに失敗: {e}"))?;
+    // 各バスがコマンドを送ってフレームを張り直すまで待つ。要求はキュー経由で
+    // 非同期なので、待たずに wait_anchored を呼ぶと**張り直す前の**
+    // anchored=true を見てしまう。
+    std::thread::sleep(SETTLE);
+    hw.legs
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（マルチターンフレームの張り直しに失敗しました）"))?;
+    hw.legs
+        .wait_first_read(Duration::from_secs(2))
+        .map_err(|e| format!("{e}（張り直し後の読み出しに失敗しました）"))?;
+    log::info!("マルチターン原点を張り直しました。この姿勢が伏せ姿勢になります");
+    Ok(())
+}
+
 fn verify_crouch_frame(cfg: &AppConfig, hw: &Hardware) {
     const TOL_RAD: f64 = 0.35;
 
@@ -345,7 +395,6 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         .wait_first_read(Duration::from_secs(2))
         .map_err(|e| format!("{e}（12 軸すべてが応答している必要があります）"))?;
     log::info!("12 軸の初回読み出しを確認しました");
-    verify_crouch_frame(&cfg, &hw);
 
     // **CH5 が「脱力」でなければ起動しない。**
     //
@@ -373,6 +422,11 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         }
         log::info!("CH5 は脱力位置です");
     }
+
+    // **原点の張り直しは CH5 の確認より後。** 張り直しはそのときの姿勢を
+    // 無条件に原点にするので、起動を続ける気が無い回でやってはいけない。
+    zero_multiturn_once(&cfg, &hw)?;
+    verify_crouch_frame(&cfg, &hw);
 
     let stop = install_signal_handler();
     let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
