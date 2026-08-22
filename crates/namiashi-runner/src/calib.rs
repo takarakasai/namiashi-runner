@@ -1007,27 +1007,76 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 /// 確認してから足す。
 fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
+    // **`--set-position-kp` を付けたときだけ書く。** 既定は読むだけ。
+    let set_kp = match cli.str("set-position-kp") {
+        None => None,
+        Some(v) => Some(
+            v.parse::<u16>()
+                .map_err(|_| format!("--set-position-kp {v:?} が数値ではありません"))
+                .and_then(|k| {
+                    if k <= 2000 {
+                        Ok(k)
+                    } else {
+                        Err(format!("--set-position-kp {k} が範囲外です（0〜2000）"))
+                    }
+                })?,
+        ),
+    };
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
 
+    if let Some(kp) = set_kp {
+        println!("**位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。**");
+        println!("電源を切れば元に戻ります。ROM には書きません。");
+        println!("Ki/Kd は現状値を保ちます（読んでから書きます）。");
+        println!();
+        println!("**`0x30` 系にしか応答しない個体には書けません**（未対応）。");
+        println!("続けるなら Enter、やめるなら Ctrl-C");
+        let _ = read_line();
+    }
     for leg in LegSlot::ALL {
         if only.is_some_and(|l| l != leg) {
             continue;
         }
-        array
-            .bus(leg)
-            .request(BusRequest::ReadPid)
-            .map_err(|e| e.to_string())?;
+        let req = match set_kp {
+            Some(kp) => BusRequest::SetPositionKp(kp),
+            None => BusRequest::ReadPid,
+        };
+        array.bus(leg).request(req).map_err(|e| e.to_string())?;
     }
-    std::thread::sleep(SETTLE);
 
-    println!("PID ゲイン 0x30（**読むだけ。何も書きません**）");
+    // **全軸ぶんの読み出しが終わるまで待つ。**
+    //
+    // `SETTLE`（300 ms）では足りない。1 軸あたり最大 200 ms × 3 回、
+    // それが 1 バス 3 軸ぶん直列に走るので、最悪 1.8 秒かかる。短く待つと
+    // **まだ読んでいない軸を「読めず」と表示する**（実際にそれで
+    // 「基板が応答しない」と誤読しかけた）。
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let done = LegSlot::ALL
+            .iter()
+            .filter(|l| !only.is_some_and(|o| o != **l))
+            .all(|l| array.bus(*l).pids().iter().all(|p| p.is_some()));
+        if done || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    println!(
+        "PID ゲイン（{}）",
+        if set_kp.is_some() {
+            "**書き込み後の読み直し**"
+        } else {
+            "**読むだけ。何も書きません**"
+        }
+    );
     println!();
     println!(
-        "{:<4} {:<6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "脚", "軸", "位置Kp", "位置Ki", "速度Kp", "速度Ki", "電流Kp", "電流Ki"
+        "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}  経路",
+        "脚", "軸", "位Kp", "位Ki", "位Kd", "速Kp", "速Ki", "速Kd", "電Kp", "電Ki", "電Kd"
     );
     let mut missing = Vec::new();
     for leg in LegSlot::ALL {
@@ -1037,15 +1086,19 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         for (k, p) in array.bus(leg).pids().iter().enumerate() {
             match p {
                 Some(p) => println!(
-                    "{:<4} {:<6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                    "{:<4} {:<6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}  {}",
                     leg.prefix(),
                     LEG_JOINT_KINDS[k],
                     p.position_kp,
                     p.position_ki,
+                    p.position_kd,
                     p.speed_kp,
                     p.speed_ki,
+                    p.speed_kd,
                     p.current_kp,
-                    p.current_ki
+                    p.current_ki,
+                    p.current_kd,
+                    p.via.label()
                 ),
                 None => {
                     println!(
@@ -1061,12 +1114,13 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     }
     println!();
     if missing.is_empty() {
-        println!("**書き込みは未実装。** `0x31`(RAM) / `0x32`(ROM) も未文書なので、");
-        println!("ペイロードの形を確かめてから足します。");
+        println!("経路: `0x30` は未文書の旧インタフェース（Kd を持たない）、");
+        println!("`0xC0` はマニュアル §18。**個体によって応答するものが違う。**");
         println!("コンプライアンスを上げるなら**位置 Kp を下げる**のが第一手です。");
     } else {
         println!("**読めなかった軸: {}**", missing.join(", "));
-        println!("この基板が `0x30` に応答しない可能性があります。");
+        println!("`0x30`（未文書）と `0xC0`（マニュアル §18）の両方を試して");
+        println!("どちらも応答しなかった軸です。**個体差**とみられます。");
     }
     Ok(())
 }

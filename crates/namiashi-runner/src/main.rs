@@ -197,8 +197,10 @@ calib のサブコマンド:
                                         ドライバの異常フラグを消す 0x9B
                                         **原因が残っている間は消えない**
                                         --dry-run なら何も送らず状態だけ見る
-  pid             [--leg FL]            ドライバの PID ゲインを読む 0x30
-                                        **読むだけ。書き込みは未実装**
+  pid             [--leg FL] [--set-position-kp N]
+                                        PID ゲインを読む（0x30 / 0xC0 自動）
+                                        --set-position-kp で位置 Kp を書く
+                                        **0xC1、RAM のみ。電源で元に戻る**
   restart         [--leg FL] [--joint thigh]
                                         ドライバを再起動 0x07（電源再投入と等価）
                                         **マルチターン原点がリセットされる**
@@ -297,6 +299,7 @@ const VALUE_FLAGS: &[&str] = &[
     "viz-key-measured",
     "viz-rate",
     "viz-endpoint",
+    "set-position-kp",
     "tilt-roll",
     "tilt-pitch",
     "tilt-yaw",

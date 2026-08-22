@@ -109,12 +109,88 @@ impl JointStatus {
 /// 返す（documented な `0xC0` は Kd も持つが、この基板は応答しない）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct JointPids {
-    pub position_kp: u8,
-    pub position_ki: u8,
-    pub speed_kp: u8,
-    pub speed_ki: u8,
-    pub current_kp: u8,
-    pub current_ki: u8,
+    pub position_kp: u16,
+    pub position_ki: u16,
+    pub position_kd: u16,
+    pub speed_kp: u16,
+    pub speed_ki: u16,
+    pub speed_kd: u16,
+    pub current_kp: u16,
+    pub current_ki: u16,
+    pub current_kd: u16,
+    /// どちらのインタフェースで読めたか。**個体で違う。**
+    pub via: PidInterface,
+}
+
+/// 位置ループの Kp だけ書き換える（`0xC1`、RAM）。Ki/Kd は現状値を保つ。
+///
+/// **読んでから書く。** Kp だけ変えたいのに 3 つ組で送る仕様なので、
+/// 現状の Ki/Kd を知らずに書くと**知らないうちに Ki を 0 にする**。
+fn write_position_kp(driver: &mut Rs485Driver, id: MotorId, kp: u16) -> lkmotor_driver::Result<()> {
+    use lkmotor_driver::protocol::command::ControlParamId;
+    use lkmotor_driver::protocol::response::{ControlParamValue, PidTriple};
+    use lkmotor_driver::LkCommands;
+    let now = match driver.read_control_param(id, ControlParamId::PositionLoopPid)? {
+        ControlParamValue::Pid(t) => t,
+        _ => return Err(lkmotor_driver::Error::Timeout { motor_id: id.get() }),
+    };
+    driver.write_control_pid_ram(id, ControlParamId::PositionLoopPid, PidTriple { kp, ..now })?;
+    Ok(())
+}
+
+/// PID を読めたインタフェース。
+///
+/// **同じ機体でも個体によって応答するものが違う**（2026-08-22 に実測）。
+/// ファームか基板の世代差とみられる。12 軸中 5 軸が `0x30` に応答し、
+/// 残り 7 軸は応答しなかった。**読めた軸・読めなかった軸は再現する**ので、
+/// タイミングではなく個体の性質。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PidInterface {
+    #[default]
+    None,
+    /// `0x30`。**未文書**だが応答する個体がある。Kp/Ki のみ（Kd は無い）。
+    Legacy,
+    /// `0xC0`。マニュアル §18 に記載。Kp/Ki/Kd を u16 で持つ。
+    Documented,
+}
+
+impl PidInterface {
+    pub fn label(self) -> &'static str {
+        match self {
+            PidInterface::None => "-",
+            PidInterface::Legacy => "0x30",
+            PidInterface::Documented => "0xC0",
+        }
+    }
+}
+
+/// `0xC0`（マニュアル §18）で 3 ループぶんの PID を読む。
+///
+/// どれか 1 つでも読めなければ `None`。**部分的に読めた値を混ぜない** —
+/// 「読めた」と表示しておいて中身が既定値、が一番たちが悪い。
+fn read_documented_pids(driver: &mut Rs485Driver, id: MotorId) -> Option<JointPids> {
+    use lkmotor_driver::protocol::command::ControlParamId;
+    use lkmotor_driver::protocol::response::ControlParamValue;
+    use lkmotor_driver::LkCommands;
+    let read = |d: &mut Rs485Driver, p: ControlParamId| match d.read_control_param(id, p) {
+        Ok(ControlParamValue::Pid(t)) => Some(t),
+        _ => None,
+    };
+    let pos = read(driver, ControlParamId::PositionLoopPid)?;
+    let spd = read(driver, ControlParamId::SpeedLoopPid)?;
+    let cur = read(driver, ControlParamId::CurrentLoopPid)?;
+    Some(JointPids {
+        position_kp: pos.kp,
+        position_ki: pos.ki,
+        position_kd: pos.kd,
+        speed_kp: spd.kp,
+        speed_ki: spd.ki,
+        speed_kd: spd.kd,
+        current_kp: cur.kp,
+        current_ki: cur.ki,
+        current_kd: cur.kd,
+        via: PidInterface::Documented,
+    })
 }
 
 /// バススレッドへの制御要求。周期指令とは別経路にしてある。
@@ -176,6 +252,15 @@ pub enum BusRequest {
     ///
     /// 結果は [`LegBus::pids`] で取る。
     ReadPid,
+    /// 位置ループの Kp を書く（`0xC1`、**RAM のみ**）。
+    ///
+    /// **電源を切れば元に戻る。** まずければ落とすだけで戻せる。
+    /// ROM には書かない。
+    ///
+    /// `0xC0` に応答する個体だけが対象。`0x30` 系にしか応答しない個体は
+    /// 未対応（書き込み側 `0x31` が未文書のため）。結果は
+    /// [`LegBus::pids`] を読み直して確かめる。
+    SetPositionKp(u16),
     /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
     ///
     /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
@@ -553,6 +638,7 @@ impl LegBus {
             max_target_rate: legs.max_target_rate_rad_s,
             issued: [None; 3],
             status_interval: Duration::from_millis(legs.status_interval_ms),
+            response_timeout: timeout,
             next_status: Instant::now(),
             status_cursor: 0,
             frame_offset: [0.0; 3],
@@ -591,6 +677,9 @@ struct BusWorker {
     issued: [Option<f64>; 3],
     /// State1 を読む間隔。0 で読まない。
     status_interval: Duration,
+    /// 制御周期用の応答待ち（`response_timeout_ms`）。
+    /// 一部の読み出しで一時的に広げたあと、これに戻す。
+    response_timeout: Duration,
     next_status: Instant,
     /// 次に State1 を読む軸。1 周回で 1 軸だけ読み、帯域を食わないようにする。
     status_cursor: usize,
@@ -943,23 +1032,58 @@ impl BusWorker {
                             };
                         })
                 }
+                BusRequest::SetPositionKp(kp) => {
+                    let id = self.motors[k].id();
+                    self.driver.set_response_timeout(Duration::from_millis(200));
+                    let r = write_position_kp(&mut self.driver, id, kp);
+                    // 書いた後の値を読み直す。応答を信じない。
+                    lock(&self.slot.pids)[k] = read_documented_pids(&mut self.driver, id);
+                    self.driver.set_response_timeout(self.response_timeout);
+                    r
+                }
                 BusRequest::ReadPid => {
                     lock(&self.slot.pids)[k] = None;
                     let id = self.motors[k].id();
-                    <Rs485Driver as lkmotor_driver::LkCommands>::read_legacy_pids(
+                    // **この読み出しだけ待ち時間を延ばす。**
+                    //
+                    // `response_timeout_ms` は制御周期のために短く（20 ms）
+                    // してあるが、`0x30` の応答はそれに間に合わないことが
+                    // ある。実測で 12 軸中 7 軸がタイムアウトし、成功した
+                    // 5 軸はすべて同値だった（= コマンド自体は効いている）。
+                    // 設定値は変えず、ここだけ広げて 3 回まで試す。
+                    self.driver.set_response_timeout(Duration::from_millis(200));
+                    // **2 つのインタフェースを両方試す。**
+                    //
+                    // `0x30`（未文書）に応答する個体と `0xC0`（マニュアル
+                    // §18）に応答する個体が混在している。実測で 12 軸中
+                    // 5 軸だけが `0x30` に答え、その内訳は再現した
+                    // （= タイミングではなく個体差）。
+                    let got = <Rs485Driver as lkmotor_driver::LkCommands>::read_legacy_pids(
                         &mut self.driver,
                         id,
                     )
-                    .map(|p| {
-                        lock(&self.slot.pids)[k] = Some(JointPids {
-                            position_kp: p.position_kp,
-                            position_ki: p.position_ki,
-                            speed_kp: p.speed_kp,
-                            speed_ki: p.speed_ki,
-                            current_kp: p.current_kp,
-                            current_ki: p.current_ki,
-                        });
+                    .ok()
+                    .map(|p| JointPids {
+                        position_kp: p.position_kp as u16,
+                        position_ki: p.position_ki as u16,
+                        position_kd: 0,
+                        speed_kp: p.speed_kp as u16,
+                        speed_ki: p.speed_ki as u16,
+                        speed_kd: 0,
+                        current_kp: p.current_kp as u16,
+                        current_ki: p.current_ki as u16,
+                        current_kd: 0,
+                        via: PidInterface::Legacy,
                     })
+                    .or_else(|| read_documented_pids(&mut self.driver, id));
+                    self.driver.set_response_timeout(self.response_timeout);
+                    match got {
+                        Some(p) => {
+                            lock(&self.slot.pids)[k] = Some(p);
+                            Ok(())
+                        }
+                        None => Err(lkmotor_driver::Error::Timeout { motor_id: id.get() }),
+                    }
                 }
                 // 失敗した軸に古い値を残さないよう、読む前に落とす。
                 BusRequest::ReadSingleTurn => {
