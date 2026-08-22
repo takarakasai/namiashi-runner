@@ -627,6 +627,47 @@ mod tests {
         }
     }
 
+    /// **スティックが中立を一瞬通っても歩容が止まらない。**
+    ///
+    /// 歩容の `PhaseGenerator::advance` は `vel.is_zero()`（**厳密な等値
+    /// 比較**）で即座に `holding` に入り、全脚を接地・`cycle_position = 0`
+    /// として静止姿勢を出す。方向転換でスティックが中立を通過すると
+    /// 3 軸そろって 0.0 になり、**その瞬間だけ立脚静止に落ちる**。
+    /// 位相は凍結されるだけで戻らないので、復帰すると前の動きの続きに
+    /// 見える（実機で「前の指令が残っているような動き」として観測）。
+    ///
+    /// ランプが時間的なヒステリシスになって、これを防ぐ。
+    #[test]
+    fn a_momentary_stick_centre_does_not_stop_the_gait() {
+        let dt = 0.005;
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            let mut c = controller();
+            let mut go = cmd(ModeRequest::Walk);
+            go.gait = select;
+            go.vx_m_s = 0.10;
+            run_until(&mut c, &go, State::Active, 20.0);
+            for _ in 0..400 {
+                c.tick(&go, &JointVec::zeros(), &imu(), dt);
+            }
+            // 中立を 25 ms 通過して反対側へ。
+            let mut centre = go;
+            centre.vx_m_s = 0.0;
+            let mut back = go;
+            back.vx_m_s = -0.10;
+            for _ in 0..5 {
+                c.tick(&centre, &JointVec::zeros(), &imu(), dt);
+                assert!(
+                    c.ramped_v.iter().any(|v| *v != 0.0),
+                    "{} で中立通過の瞬間に速度がちょうど 0 になった                     （歩容が立脚静止へ落ちる）",
+                    select.label()
+                );
+            }
+            for _ in 0..5 {
+                c.tick(&back, &JointVec::zeros(), &imu(), dt);
+            }
+        }
+    }
+
     /// ランプは止まる側にもかかる。片側だけでは足りない。
     #[test]
     fn the_velocity_ramp_applies_in_both_directions() {
