@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use namiashi_hal::arm::ArmServo;
 use namiashi_hal::ch348::PortMap;
 use namiashi_hal::imu::ImuReader;
-use namiashi_hal::joint::{JointCommand, JointMode, LegSlot};
+use namiashi_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
 use namiashi_hal::legs::{BusRequest, LegArray};
 use namiashi_hal::sbus::SbusReceiver;
 
@@ -85,6 +85,84 @@ impl Hardware {
 /// 一律 `Restart=on-failure` にすると後者まで拾い、一律 `Restart=no` にすると
 /// 本番で「プロポを後から入れたのに立ち上がらない」になる。
 pub const RETRYABLE: &str = "[retryable] ";
+
+/// マルチターン原点が伏せ姿勢を指しているかの検算。**警告するだけで止めない。**
+///
+/// # 何を見ているのか
+///
+/// このロボットの角度規約は `q_model = sign * q_motor + zero_pose_rad` で、
+/// **モータ角 0 が伏せ姿勢**と決めてある。モータのマルチターンカウンタは
+/// 電源投入時に 0 になるので、これは「伏せ姿勢でモータ電源を入れること」と
+/// 同義。守られていれば、起動直後の実測モデル角は 12 軸とも
+/// `zero_pose_rad` に一致するはずで、一致しなければ原点が別の姿勢に
+/// 張られている。その場合 `zero_pose_rad` は 12 軸すべて無効で、
+/// 関節角は全部ずれる。
+///
+/// # なぜ止めないのか
+///
+/// 本番会場では PC を繋げないので、止めても脱力したまま動かないだけで
+/// 理由が分からない。閾値を外した場合に**会場で立てなくなる**リスクの方が
+/// 大きいと判断した（2026-08-22 の運用判断）。ベンチで基準の正しさを
+/// 確かめる道具として使う。
+///
+/// # 閾値
+///
+/// 0.35 rad (20°)。伏せと立脚では thigh/calf が 1.0〜1.4 rad 違うので、
+/// 「別の姿勢で電源が入った」ケースとは明確に分かれる。一方、伏せ姿勢を
+/// 手で作るときのばらつきはこれより十分小さい。
+fn verify_crouch_frame(cfg: &AppConfig, hw: &Hardware) {
+    const TOL_RAD: f64 = 0.35;
+
+    let measured = hw.measured(0.0);
+    let mut worst = 0.0f64;
+    let mut worst_at = String::new();
+    let mut rows = Vec::new();
+    for leg in LegSlot::ALL {
+        let Some(bus) = cfg.hardware.bus_for(leg) else {
+            return;
+        };
+        for k in 0..3 {
+            let Some(motor) = bus.motors.get(k) else {
+                return;
+            };
+            let q = measured.legs[leg.index()][k];
+            let d = q - motor.zero_pose_rad;
+            if d.abs() > worst {
+                worst = d.abs();
+                worst_at = format!("{} {}", leg.prefix(), LEG_JOINT_KINDS[k]);
+            }
+            rows.push(format!(
+                "{} {}: 実測 {:+.3} / 伏せ {:+.3} / 差 {:+.3} rad",
+                leg.prefix(),
+                LEG_JOINT_KINDS[k],
+                q,
+                motor.zero_pose_rad,
+                d
+            ));
+        }
+    }
+
+    if worst <= TOL_RAD {
+        log::info!(
+            "マルチターン原点は伏せ姿勢と整合しています（最大ずれ {:.3} rad @ {}）",
+            worst,
+            worst_at
+        );
+        return;
+    }
+    log::warn!(
+        "**マルチターン原点が伏せ姿勢と合っていません**（最大ずれ {:.3} rad @ {}、許容 {:.2}）。\
+         伏せ以外の姿勢でモータ電源が入った可能性があります。この場合 zero_pose_rad は\
+         12 軸すべて無効で、関節角は全部ずれます。**伏せ姿勢に直してモータ電源を入れ直すか、\
+         伏せ姿勢で `calib clear-multiturn` を実行してください。**",
+        worst,
+        worst_at,
+        TOL_RAD
+    );
+    for row in rows {
+        log::warn!("  {row}");
+    }
+}
 
 
 /// 追従誤差と可動域逸脱の監視。**検出して言うだけで、何もしない。**
@@ -267,6 +345,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         .wait_first_read(Duration::from_secs(2))
         .map_err(|e| format!("{e}（12 軸すべてが応答している必要があります）"))?;
     log::info!("12 軸の初回読み出しを確認しました");
+    verify_crouch_frame(&cfg, &hw);
 
     // **CH5 が「脱力」でなければ起動しない。**
     //

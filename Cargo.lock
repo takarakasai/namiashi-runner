@@ -1944,6 +1944,7 @@ dependencies = [
 name = "namiashi-hal"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "lkmotor-driver",
  "log",
  "misa-actuator",

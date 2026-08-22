@@ -585,7 +585,60 @@ impl Drop for LegBus {
 }
 
 /// 脚 4 本ぶん。
+/// 脚バスの排他ロック。**同時に 2 プロセスがモータを掴むのを防ぐ。**
+///
+/// # なぜ要るのか
+///
+/// RS485 は要求と応答が 1 対 1 で対応しているだけで、宛先の検証は無い。
+/// 2 つのプロセスが同じバスへ同時に喋ると、片方の応答をもう片方が自分の
+/// 要求への返事として受け取る。**角度が静かに壊れる**わけで、通信エラーとして
+/// は現れない。実際にサービス化の初日、systemd 起動とデーモンが二重に走って
+/// マルチターン基準が別物になった。
+///
+/// シリアルポートは既定で排他にならない（`open` は何度でも通る）ので、
+/// ここで明示的に flock を取る。プロセスが死ねば fd が閉じて自動的に外れる。
+struct LegsLock {
+    _file: std::fs::File,
+}
+
+impl LegsLock {
+    /// `/run/lock` は FHS のロック置き場で、どのディストロでも 1777。
+    /// `/tmp` を使わないのは、systemd の `PrivateTmp=` を後から付けた瞬間に
+    /// 排他が黙って効かなくなるため。
+    const PATH: &'static str = "/run/lock/namiashi-legs.lock";
+
+    fn acquire() -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        // 0666 で作る。root で 1 度動かすと takara 所有でなくなり、以後
+        // サービスがロックを取れなくなるため。umask で落ちても、下の
+        // 読み取り専用フォールバックで拾える（flock に書き込み権限は要らない）。
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o666)
+            .open(Self::PATH)
+            .or_else(|_| std::fs::File::open(Self::PATH))
+            .map_err(|e| Error::Config(format!("{} を開けません: {e}", Self::PATH)))?;
+        // SAFETY: 開いたばかりの有効な fd を渡すだけ。
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            return Err(Error::Config(format!(
+                "脚バスは既に別のプロセスが使っています。\
+                 **2 つ同時に動かすとモータの応答が取り違えられて角度が壊れます。**\
+                 `systemctl status namiashi` と `pgrep -a namiashi` で確認し、\
+                 先に止めてください"
+            )));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
 pub struct LegArray {
+    /// 生きている間だけ排他が続く。フィールドの順序上、`buses` より後に
+    /// drop されるが、どちらの順でも安全。
+    _lock: LegsLock,
     buses: [LegBus; 4],
 }
 
@@ -612,6 +665,9 @@ impl LegArray {
 
     /// 事前に取った探索結果を使って開く。
     pub fn connect_with(cfg: &HardwareConfig, map: &PortMap) -> Result<Self> {
+        // ポートを開く前に取る。開いてから弾くと、その一瞬だけ二重に
+        // 喋る窓ができる。
+        let lock = LegsLock::acquire()?;
         let mut buses: Vec<LegBus> = Vec::with_capacity(4);
         for leg in LegSlot::ALL {
             let bus_cfg = cfg
@@ -622,7 +678,7 @@ impl LegArray {
         let buses: [LegBus; 4] = buses
             .try_into()
             .map_err(|_| Error::Config("脚バスの本数が 4 ではありません".into()))?;
-        Ok(Self { buses })
+        Ok(Self { _lock: lock, buses })
     }
 
     pub fn bus(&self, leg: LegSlot) -> &LegBus {
