@@ -754,6 +754,10 @@ fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 /// 潰したと判断したときだけ。
 fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
+    // **何も送らずに見るだけ。** 異常の原因を切り分けるとき、クリアを
+    // 投げてしまうと「時間で消えた」のか「コマンドで消えた」のかが
+    // 分からなくなる。観測を汚さないための逃げ道。
+    let dry_run = cli.flag("dry-run");
     let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
@@ -763,8 +767,20 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         cfg.hardware.legs.status_interval_ms * 4,
     ));
 
-    println!("クリア前:");
+    println!(
+        "{}:",
+        if dry_run {
+            "現在の状態"
+        } else {
+            "クリア前"
+        }
+    );
     let before = report_faults(&array, only);
+    if dry_run {
+        println!();
+        println!("**--dry-run: 何も送っていません。**");
+        return Ok(());
+    }
     if before == 0 {
         println!("  異常なし。何もしません");
         println!();

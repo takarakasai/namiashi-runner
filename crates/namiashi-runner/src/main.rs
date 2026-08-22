@@ -190,8 +190,10 @@ calib のサブコマンド:
                                         マルチターンを 0 に戻す（電源 OFF/ON 相当）
   single-turn     [--leg FL]            単回転絶対角 0x94 を読む（**読むだけ**）
                                         電源 OFF/ON をまたいで一致する唯一の値
-  clear-error     [--leg FL]            ドライバの異常フラグを消す 0x9B
+  clear-error     [--leg FL] [--dry-run]
+                                        ドライバの異常フラグを消す 0x9B
                                         **原因が残っている間は消えない**
+                                        --dry-run なら何も送らず状態だけ見る
   restart         [--leg FL] [--joint thigh]
                                         ドライバを再起動 0x07（電源再投入と等価）
                                         **マルチターン原点がリセットされる**
@@ -295,6 +297,7 @@ const VALUE_FLAGS: &[&str] = &[
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
 const BOOL_FLAGS: &[&str] = &[
     "help",
+    "dry-run",
     "allow-no-sbus",
     "skip-zero",
     "viz",
