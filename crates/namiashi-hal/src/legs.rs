@@ -133,6 +133,17 @@ pub enum BusRequest {
     ClearMultiTurn,
     /// 1 軸だけマルチターンカウンタを 0 に戻す。検証用。
     ClearMultiTurnJoint(usize),
+    /// ドライバを再起動する（`0x07`）。**電源再投入と等価。**
+    ///
+    /// **マルチターン原点がリセットされる。** 実行後の原点は「そのときの
+    /// 姿勢」になるので、`zero_pose_rad` はその姿勢を基準に測り直しになる
+    /// （伏せ姿勢で実行すれば従来どおりの約束で維持できる）。
+    ///
+    /// **RS485 マニュアルに載っていないコマンド**（記載は CAN §29 のみ）。
+    /// 応答も返らないので、成否は状態を読み直して確かめる。
+    Restart,
+    /// 1 軸だけ再起動する。検証用。
+    RestartJoint(usize),
     /// ドライバの異常フラグを消す（`0x9B`）。3 軸まとめて。
     ///
     /// **原因が残っている間は消えない。** マニュアル §2 が
@@ -849,6 +860,7 @@ impl BusWorker {
         let joints: &[usize] = match req {
             BusRequest::EnableJoint(k)
             | BusRequest::DisableJoint(k)
+            | BusRequest::RestartJoint(k)
             | BusRequest::ClearMultiTurnJoint(k) => {
                 if k >= 3 {
                     log::warn!("{} に軸 {k} はありません", self.leg.prefix());
@@ -873,6 +885,9 @@ impl BusWorker {
                 BusRequest::Zero => Ok(()),
                 BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_) => {
                     self.motors[k].clear_multi_turn(&mut self.driver)
+                }
+                BusRequest::Restart | BusRequest::RestartJoint(_) => {
+                    self.motors[k].restart(&mut self.driver)
                 }
                 BusRequest::ClearError => {
                     self.motors[k].clear_error(&mut self.driver).map(|st| {
@@ -905,17 +920,26 @@ impl BusWorker {
         }
         let cleared = matches!(
             req,
-            BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_)
+            BusRequest::ClearMultiTurn
+                | BusRequest::ClearMultiTurnJoint(_)
+                | BusRequest::Restart
+                | BusRequest::RestartJoint(_)
         );
         if req == BusRequest::Zero || cleared {
             // Zero は**モータには何も書かない**。マルチターンフレームとの差を
             // 読み直すだけ。電源を入れ直した後など、フレームがずれた
             // 可能性があるときに使う。
             //
-            // ClearMultiTurn はモータ側のカウンタを 0 に戻したので、当然
+            // ClearMultiTurn / Restart はモータ側の原点が動いたので、当然
             // フレームも張り直す必要がある。
+            //
+            // **Restart は応答が返らない。** 送った直後はドライバが再起動
+            // 中で、`establish_frame` の読み出しに答えられない。少し待つ。
             self.frame_ready = false;
             self.slot.anchored.store(false, Ordering::Relaxed);
+            if matches!(req, BusRequest::Restart | BusRequest::RestartJoint(_)) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
             if cleared {
                 log::warn!(
                     "{} のマルチターンカウンタを 0 に戻しました。\

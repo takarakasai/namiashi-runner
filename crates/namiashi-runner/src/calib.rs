@@ -42,9 +42,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("clear-multiturn") => clear_multiturn(cfg, cli),
         Some("single-turn") => single_turn(cfg, cli),
         Some("clear-error") => clear_error(cfg, cli),
+        Some("restart") => restart(cfg, cli),
         Some(other) => Err(format!(
             "未知の calib サブコマンド {other:?}\
-             （scan|move|range|zero|clear-multiturn|single-turn|clear-error）"
+             （scan|move|range|zero|clear-multiturn|single-turn|clear-error|restart）"
         )),
         None => Err(
             "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
@@ -833,4 +834,133 @@ fn report_faults(array: &LegArray, only: Option<LegSlot>) -> usize {
         }
     }
     n
+}
+
+/// `calib restart` — ドライバを再起動する（`0x07`）。**電源再投入と等価。**
+///
+/// # 何のために要るのか
+///
+/// 低電圧保護（`0x01`）はヒステリシスを持ち、**トリップ電圧より高い電圧まで
+/// 戻さないと解除されない**（実測: トリップは 19.8 V 未満、リセットは
+/// 19.9〜20.9 V の間）。安定化電源なら上げて戻せるが、**バッテリの電圧は
+/// 上がらない**。試合中にトリップすると交換か充電まで復帰できない。
+///
+/// 再起動が保護を解除できるなら、そこが**バッテリ運用での唯一の復帰経路**に
+/// なる。この副コマンドはそれを確かめるためのもの。
+///
+/// # 2 つの未知
+///
+/// - **RS485 マニュアルに `0x07` は無い**（記載は CAN §29 のみ）。RS485 の
+///   ファームが受け付けるかは未検証。応答も返らないので、成否は状態を
+///   読み直すしかない
+/// - **再起動しても電圧が低いままなら、起動時の判定で再びトリップするかも
+///   しれない。** そうならこの経路は使えない
+///
+/// # 代償
+///
+/// **マルチターン原点がリセットされる。** 実行後の原点は「そのときの姿勢」に
+/// なるので、`zero_pose_rad` は伏せ姿勢で実行したときだけ従来どおり有効。
+/// **伏せ姿勢以外で実行したら 12 軸のゼロ点は測り直し。**
+fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let only = leg_filter(cli)?;
+    let only_joint = match cli.str("joint") {
+        None => None,
+        Some(name) => Some(
+            LEG_JOINT_KINDS
+                .iter()
+                .position(|k| *k == name)
+                .ok_or_else(|| format!("--joint {name:?} が不正です（hip/thigh/calf）"))?,
+        ),
+    };
+    if only_joint.is_some() && only.is_none() {
+        return Err("--joint を使うときは --leg も指定してください".into());
+    }
+
+    match (only, only_joint) {
+        (Some(l), Some(k)) => println!(
+            "**{} の {} だけ**ドライバを再起動します（電源再投入と等価）。",
+            l.prefix(),
+            LEG_JOINT_KINDS[k]
+        ),
+        (Some(l), None) => println!(
+            "**{} の 3 軸**のドライバを再起動します（電源再投入と等価）。",
+            l.prefix()
+        ),
+        _ => println!("**12 軸すべて**のドライバを再起動します（電源再投入と等価）。"),
+    }
+    println!();
+    println!("**マルチターン原点がリセットされます。**");
+    println!("実行後は「いまの姿勢」が新しい原点になるので、");
+    println!("**伏せ姿勢で実行しない限り zero_pose_rad は測り直しです。**");
+    println!();
+    println!("`0x07` は RS485 マニュアルに記載がありません（CAN §29 のみ）。");
+    println!("応答も返らないので、効いたかどうかは状態を読み直して確かめます。");
+    println!();
+    println!("続けるなら Enter、やめるなら Ctrl-C");
+    let _ = read_line();
+
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+    std::thread::sleep(Duration::from_millis(
+        cfg.hardware.legs.status_interval_ms * 4,
+    ));
+
+    println!();
+    println!("再起動前:");
+    let before = report_faults(&array, only);
+    let q_before = array.states();
+
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        let req = match only_joint {
+            Some(k) => BusRequest::RestartJoint(k),
+            None => BusRequest::Restart,
+        };
+        array.bus(leg).request(req).map_err(|e| e.to_string())?;
+    }
+    // ドライバの再起動 + フレーム張り直し + status の 1 巡ぶん。
+    std::thread::sleep(Duration::from_secs(2));
+    array
+        .wait_anchored(Duration::from_secs(5))
+        .map_err(|e| format!("{e}（再起動後にモータが応答していません）"))?;
+    std::thread::sleep(Duration::from_millis(
+        cfg.hardware.legs.status_interval_ms * 4,
+    ));
+
+    println!();
+    println!("再起動後:");
+    let after = report_faults(&array, only);
+
+    println!();
+    println!("マルチターン角の変化（原点がリセットされたかの確認）:");
+    let q_after = array.states();
+    for (leg, (b, a)) in LegSlot::ALL.iter().zip(q_before.iter().zip(q_after.iter())) {
+        if only.is_some_and(|l| l != *leg) {
+            continue;
+        }
+        let d: Vec<String> = b
+            .iter()
+            .zip(a.iter())
+            .map(|(x, y)| format!("{:+.3}", y.position_rad - x.position_rad))
+            .collect();
+        println!("  {} Δq(model) = [{}] rad", leg.prefix(), d.join(" "));
+    }
+
+    println!();
+    if before > 0 && after == 0 {
+        println!("**異常が消えました。再起動は保護の解除に使えます。**");
+        println!("バッテリ運用での復帰経路になり得ます（0x94 への移行と組み合わせ）。");
+    } else if before > 0 {
+        println!("**{after} 軸で異常が残りました。再起動では解除できません。**");
+        println!("起動時の判定で再びトリップしている可能性が高いです。");
+    } else {
+        println!("元から異常はありませんでした（再起動が効いたかは別途確認）。");
+    }
+    println!();
+    println!("**Δq が 0 でないなら原点が動いています。zero_pose_rad は測り直しです。**");
+    Ok(())
 }
