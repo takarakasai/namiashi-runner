@@ -1007,6 +1007,19 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 /// 確認してから足す。
 fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
+    // **`--leg` は 3 軸すべてに効く。** 1 軸だけ触るなら `--joint` も要る。
+    let only_joint = match cli.str("joint") {
+        None => None,
+        Some(name) => Some(
+            LEG_JOINT_KINDS
+                .iter()
+                .position(|k| *k == name)
+                .ok_or_else(|| format!("--joint {name:?} が不正です（hip/thigh/calf）"))?,
+        ),
+    };
+    if only_joint.is_some() && only.is_none() {
+        return Err("--joint を使うときは --leg も指定してください".into());
+    }
     // **`--set-position-kp` を付けたときだけ書く。** 既定は読むだけ。
     let set_kp = match cli.str("set-position-kp") {
         None => None,
@@ -1028,7 +1041,18 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
 
     if let Some(kp) = set_kp {
-        println!("**位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。**");
+        match (only, only_joint) {
+            (Some(l), Some(k)) => println!(
+                "**{} の {} だけ**位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。",
+                l.prefix(),
+                LEG_JOINT_KINDS[k]
+            ),
+            (Some(l), None) => println!(
+                "**{} の 3 軸**の位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。",
+                l.prefix()
+            ),
+            _ => println!("**12 軸すべて**の位置ループ Kp を {kp} に書きます（0xC1、RAM のみ）。"),
+        }
         println!("電源を切れば元に戻ります。ROM には書きません。");
         println!("Ki/Kd は現状値を保ちます（読んでから書きます）。");
         println!();
@@ -1040,9 +1064,10 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if only.is_some_and(|l| l != leg) {
             continue;
         }
-        let req = match set_kp {
-            Some(kp) => BusRequest::SetPositionKp(kp),
-            None => BusRequest::ReadPid,
+        let req = match (set_kp, only_joint) {
+            (Some(kp), Some(k)) => BusRequest::SetPositionKpJoint(k, kp),
+            (Some(kp), None) => BusRequest::SetPositionKp(kp),
+            (None, _) => BusRequest::ReadPid,
         };
         array.bus(leg).request(req).map_err(|e| e.to_string())?;
     }

@@ -261,6 +261,8 @@ pub enum BusRequest {
     /// 未対応（書き込み側 `0x31` が未文書のため）。結果は
     /// [`LegBus::pids`] を読み直して確かめる。
     SetPositionKp(u16),
+    /// 1 軸だけ位置ループ Kp を書く。**まずこれで試すこと。**
+    SetPositionKpJoint(usize, u16),
     /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
     ///
     /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
@@ -982,6 +984,7 @@ impl BusWorker {
             BusRequest::EnableJoint(k)
             | BusRequest::DisableJoint(k)
             | BusRequest::RestartJoint(k)
+            | BusRequest::SetPositionKpJoint(k, _)
             | BusRequest::ClearMultiTurnJoint(k) => {
                 if k >= 3 {
                     log::warn!("{} に軸 {k} はありません", self.leg.prefix());
@@ -1032,7 +1035,7 @@ impl BusWorker {
                             };
                         })
                 }
-                BusRequest::SetPositionKp(kp) => {
+                BusRequest::SetPositionKp(kp) | BusRequest::SetPositionKpJoint(_, kp) => {
                     let id = self.motors[k].id();
                     self.driver.set_response_timeout(Duration::from_millis(200));
                     let r = write_position_kp(&mut self.driver, id, kp);
