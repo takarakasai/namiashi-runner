@@ -334,6 +334,33 @@ impl LegArray {
             timeout,
         })
     }
+
+    /// 12 軸すべてが**一度でも読めた**状態になるまで待つ。
+    ///
+    /// # なぜ [`Self::wait_anchored`] では足りないか
+    ///
+    /// `wait_anchored` は `establish_frame` が通った時点で返るが、そこは
+    /// **共有状態の [`JointState`] をまだ書いていない**。書くのは次の
+    /// トランザクション周回。したがって `wait_anchored` の直後に
+    /// [`Self::states`] を読むと、既定値（`position_rad = 0.0`, `ok = false`）
+    /// が返ることがある。
+    ///
+    /// **脱力からの遷移はその実測値を始点にする。** 0 を掴むと、実際には
+    /// −2.7 rad にある関節の目標がいきなり 0 になり、最初の起立で暴れる。
+    /// 制御ループへ入る前にこれを待つこと。
+    pub fn wait_first_read(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.all_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(Error::Timeout {
+            what: "12 軸の初回読み出し".into(),
+            timeout,
+        })
+    }
 }
 
 /// モデル ↔ モータの座標変換と可動域を持つ 1 軸ぶんの写像。

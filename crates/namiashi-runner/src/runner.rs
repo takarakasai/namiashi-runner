@@ -134,6 +134,21 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         log::info!("マルチターンフレームを確立しました");
     }
 
+    // **12 軸が一度でも読めるまで制御ループに入らない。**
+    //
+    // `wait_anchored` はフレーム確立で返るが、その時点では共有状態の
+    // `JointState` がまだ既定値（`position_rad = 0.0`, `ok = false`）のことが
+    // ある。書かれるのは次のトランザクション周回。
+    //
+    // 脱力からの遷移は**実測値を始点**に張る（`Controller::tick_relaxed`）。
+    // 0 を掴むと、実際には −2.7 rad にある calf の目標がいきなり 0 になり、
+    // **最初の起立で暴れる**。`--skip-zero` でも省略しない — 読めない 12 軸を
+    // 相手に制御ループを回すこと自体が危ない。
+    hw.legs
+        .wait_first_read(Duration::from_secs(2))
+        .map_err(|e| format!("{e}（12 軸すべてが応答している必要があります）"))?;
+    log::info!("12 軸の初回読み出しを確認しました");
+
     let stop = install_signal_handler();
     let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
     let teleop_timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
