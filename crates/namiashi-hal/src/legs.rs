@@ -75,6 +75,32 @@ impl JointStatus {
     pub fn faulted(&self) -> bool {
         self.valid && self.error_raw != 0
     }
+
+    /// 立っている異常ビットを日本語で並べる。異常なしなら空。
+    ///
+    /// **生値の `0x01` だけ出しても現場では何も分からない。** マニュアル
+    /// §1 の `errorState` は 1 ビットずつ意味が違い、対処もまるで別物
+    /// （低電圧は電源、過熱は冷却待ち）。
+    pub fn describe(&self) -> String {
+        if !self.faulted() {
+            return String::new();
+        }
+        const BITS: [(u8, &str); 4] = [
+            (0x01, "低電圧保護"),
+            (0x02, "高電圧保護"),
+            (0x04, "ドライバ過熱"),
+            (0x08, "モータ過熱"),
+        ];
+        let mut out: Vec<&str> = BITS
+            .iter()
+            .filter(|(bit, _)| self.error_raw & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        if self.error_raw & !0x0F != 0 {
+            out.push("未定義ビット");
+        }
+        out.join(" + ")
+    }
 }
 
 /// バススレッドへの制御要求。周期指令とは別経路にしてある。
@@ -107,6 +133,13 @@ pub enum BusRequest {
     ClearMultiTurn,
     /// 1 軸だけマルチターンカウンタを 0 に戻す。検証用。
     ClearMultiTurnJoint(usize),
+    /// ドライバの異常フラグを消す（`0x9B`）。3 軸まとめて。
+    ///
+    /// **原因が残っている間は消えない。** マニュアル §2 が
+    /// 「the error flags cannot be cleared while the motor state has not yet
+    /// returned to normal」と明記している。低電圧保護ならバス電圧を戻して
+    /// から投げること。結果は [`LegBus::status`] を読み直して確かめる。
+    ClearError,
     /// 単回転絶対角（`0x94`）を 3 軸ぶん読む。**読むだけ。**
     ///
     /// `0x92`（マルチターン）が電源投入時の姿勢を 0 とするのに対し、こちらは
@@ -841,6 +874,17 @@ impl BusWorker {
                 BusRequest::ClearMultiTurn | BusRequest::ClearMultiTurnJoint(_) => {
                     self.motors[k].clear_multi_turn(&mut self.driver)
                 }
+                BusRequest::ClearError => {
+                    self.motors[k].clear_error(&mut self.driver).map(|st| {
+                        // 返るのは「消した後の状態」。消えたかはここで分かる。
+                        lock(&self.slot.status)[k] = JointStatus {
+                            voltage_v: st.voltage_v() as f64,
+                            temperature_c: st.temperature_c as f64,
+                            error_raw: st.error_state,
+                            valid: true,
+                        };
+                    })
+                }
                 // 失敗した軸に古い値を残さないよう、読む前に落とす。
                 BusRequest::ReadSingleTurn => {
                     lock(&self.slot.single_turn)[k] = None;
@@ -902,6 +946,37 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn error_bits_are_spelled_out_not_left_as_hex() {
+        // 生値 0x01 だけ出しても現場では分からない。対処が違う。
+        let low = JointStatus {
+            error_raw: 0x01,
+            valid: true,
+            ..Default::default()
+        };
+        assert_eq!(low.describe(), "低電圧保護");
+        let both = JointStatus {
+            error_raw: 0x0C,
+            valid: true,
+            ..Default::default()
+        };
+        assert_eq!(both.describe(), "ドライバ過熱 + モータ過熱");
+        // 未読・正常では何も言わない。
+        assert_eq!(JointStatus::default().describe(), "");
+        let ok = JointStatus {
+            valid: true,
+            ..Default::default()
+        };
+        assert_eq!(ok.describe(), "");
+        // 知らないビットも取りこぼさない。
+        let odd = JointStatus {
+            error_raw: 0x80,
+            valid: true,
+            ..Default::default()
+        };
+        assert_eq!(odd.describe(), "未定義ビット");
+    }
     use super::*;
 
     fn map(sign: f64, zero: f64) -> JointMap {

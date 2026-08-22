@@ -197,6 +197,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let started = Instant::now();
     let mut motors_enabled = false;
     let mut measured_seen = false;
+    let mut fault_hint_shown = false;
     let mut next = Instant::now();
     let mut last_status = Instant::now();
     let mut worst_overrun = Duration::ZERO;
@@ -291,7 +292,14 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         if opts.status_interval_s > 0.0
             && last_status.elapsed().as_secs_f64() >= opts.status_interval_s
         {
-            log_status(&hw, &controller, &cmd, ticks, worst_overrun);
+            log_status(
+                &hw,
+                &controller,
+                &cmd,
+                ticks,
+                worst_overrun,
+                &mut fault_hint_shown,
+            );
             last_status = Instant::now();
             worst_overrun = Duration::ZERO;
         }
@@ -352,6 +360,7 @@ fn log_status(
     cmd: &crate::teleop::OperatorCommand,
     ticks: u64,
     worst_overrun: Duration,
+    fault_hint_shown: &mut bool,
 ) {
     let rates: Vec<String> = hw
         .legs
@@ -398,12 +407,25 @@ fn log_status(
     // 毎回はっきり出す。
     for (leg, k, st) in &faults {
         log::error!(
-            "  異常: {} 軸{k} エラービット 0x{:02X}（{:.1} V / {:.0} °C）",
+            "  異常: {} {} **{}**（0x{:02X}）{:.1} V / {:.0} °C",
             leg.prefix(),
+            namiashi_hal::joint::LEG_JOINT_KINDS[*k],
+            st.describe(),
             st.error_raw,
             st.voltage_v,
             st.temperature_c
         );
+    }
+    // 消し方は毎回書かない。**同じ異常が続いている間は 1 度だけ**。
+    if !faults.is_empty() && !*fault_hint_shown {
+        *fault_hint_shown = true;
+        log::error!(
+            "  原因を取り除いてから `namiashi calib clear-error` で消せます\
+             （原因が残っている間は消えません — マニュアル §2）"
+        );
+    }
+    if faults.is_empty() {
+        *fault_hint_shown = false;
     }
     if controller.state() == State::PlayingPose {
         if let Some(name) = controller.playing() {

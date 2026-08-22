@@ -41,8 +41,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("zero") => zero(cfg, cli),
         Some("clear-multiturn") => clear_multiturn(cfg, cli),
         Some("single-turn") => single_turn(cfg, cli),
+        Some("clear-error") => clear_error(cfg, cli),
         Some(other) => Err(format!(
-            "未知の calib サブコマンド {other:?}（scan|move|range|zero|clear-multiturn|single-turn）"
+            "未知の calib サブコマンド {other:?}\
+             （scan|move|range|zero|clear-multiturn|single-turn|clear-error）"
         )),
         None => Err(
             "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
@@ -736,4 +738,96 @@ fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `calib clear-error` — ドライバの異常フラグを消す（`0x9B`）。
+///
+/// # 原因が残っていると消えない
+///
+/// マニュアル §2 に「the error flags cannot be cleared while the motor state
+/// has not yet returned to normal」とある。**低電圧保護ならバス電圧を戻して
+/// から実行すること。** 電圧が下がったままいくら投げても消えない。
+///
+/// だから**起動時の自動クリアはしない**。効かないうえ、効いてしまう場合は
+/// 「生きている異常を握り潰して動き出す」ことになる。消すのは人が原因を
+/// 潰したと判断したときだけ。
+fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let only = leg_filter(cli)?;
+    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    array
+        .wait_anchored(Duration::from_secs(3))
+        .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
+    // 現状を掴むために 1 巡ぶん待つ（status は軸ごとに順番に読まれる）。
+    std::thread::sleep(Duration::from_millis(
+        cfg.hardware.legs.status_interval_ms * 4,
+    ));
+
+    println!("クリア前:");
+    let before = report_faults(&array, only);
+    if before == 0 {
+        println!("  異常なし。何もしません");
+        return Ok(());
+    }
+
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        array
+            .bus(leg)
+            .request(BusRequest::ClearError)
+            .map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(SETTLE);
+
+    println!();
+    println!("クリア後:");
+    let after = report_faults(&array, only);
+    println!();
+    if after == 0 {
+        println!("**消えました。**");
+    } else {
+        println!("**{after} 軸で消えませんでした。原因がまだ残っています。**");
+        println!("マニュアル §2: 状態が正常に戻るまでフラグは消せません。");
+        println!("  低電圧保護 … 電源電圧を確認（電流制限に当たっていませんか）");
+        println!("  過熱       … 冷えるまで待つ");
+    }
+    Ok(())
+}
+
+/// 12 軸（または指定脚）の異常を並べる。戻り値は異常が立っている軸数。
+fn report_faults(array: &LegArray, only: Option<LegSlot>) -> usize {
+    let mut n = 0;
+    for leg in LegSlot::ALL {
+        if only.is_some_and(|l| l != leg) {
+            continue;
+        }
+        for (k, st) in array.bus(leg).status().iter().enumerate() {
+            if !st.valid {
+                println!("  {} {} … 未読", leg.prefix(), LEG_JOINT_KINDS[k]);
+                continue;
+            }
+            if st.faulted() {
+                n += 1;
+                println!(
+                    "  {} {:<5} **{}**（0x{:02X}）  {:.1} V / {:.0} °C",
+                    leg.prefix(),
+                    LEG_JOINT_KINDS[k],
+                    st.describe(),
+                    st.error_raw,
+                    st.voltage_v,
+                    st.temperature_c
+                );
+            } else {
+                println!(
+                    "  {} {:<5} 正常  {:.1} V / {:.0} °C",
+                    leg.prefix(),
+                    LEG_JOINT_KINDS[k],
+                    st.voltage_v,
+                    st.temperature_c
+                );
+            }
+        }
+    }
+    n
 }
