@@ -476,8 +476,13 @@ impl Controller {
                 self.targets.arm = observed;
             }
         }
-        // 再生中に歩行へ切り替えたら、その時点で立ち姿勢へ戻す。
-        if done || cmd.mode == ModeRequest::Walk {
+        // **中断は CH5 を中段（初期姿勢）へ戻したとき。** 脱力は共通処理が拾う。
+        //
+        // かつて `cmd.mode == ModeRequest::Walk` で中断していたが、再生に
+        // 入れるのは `Active`、つまり **CH5 上段 = `Walk` のときだけ**なので、
+        // トリガした次の周期で必ずこの条件が立ち、1 周期で抜けていた。
+        // 「歩行へ切り替えたら中断」は、入口が歩行である以上成り立たない。
+        if done || cmd.mode == ModeRequest::Stand {
             self.player = Some(PosePlayer::to_pose(
                 self.targets,
                 self.stance_targets(),
@@ -1073,7 +1078,6 @@ mod tests {
         assert!(moved, "歩行指令を出しても関節が動いていません");
     }
 
-    #[test]
     /// **既定 (`body_attitude_max_rad = 0`) では出力が 1 ビットも変わらない。**
     ///
     /// 制御ループの出力に手を入れる機能なので、設定で明示的に上げるまで
@@ -1389,6 +1393,31 @@ mod tests {
         assert!((out.targets.arm - 0.3).abs() < 1e-9, "{}", out.targets.arm);
     }
 
+    /// ポーズ再生に入ってから抜けるまでの秒数。`hold` を毎周期与える。
+    fn play_pose_seconds(seq: &str, hold: &OperatorCommand) -> f64 {
+        let mut cfg = AppConfig::default();
+        cfg.poses.greeting = seq.into();
+        let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+        let mut c = Controller::new(robot, cfg);
+        run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+        let mut play = cmd(ModeRequest::Walk);
+        play.play_pose = true;
+        assert_eq!(
+            c.tick(&play, &JointVec::zeros(), &imu(), 0.005).state,
+            State::PlayingPose,
+            "ポーズ再生に入れていません"
+        );
+        let dt = 0.005;
+        let mut t = 0.0;
+        while t < 20.0 {
+            if c.tick(hold, &JointVec::zeros(), &imu(), dt).state != State::PlayingPose {
+                return t;
+            }
+            t += dt;
+        }
+        panic!("ポーズ再生から抜けませんでした");
+    }
+
     #[test]
     fn playing_a_pose_returns_to_the_stance() {
         let mut cfg = AppConfig::default();
@@ -1404,5 +1433,36 @@ mod tests {
             State::PlayingPose
         );
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+    }
+
+    /// **CH5 を上段に置いたまま最後まで再生できること。**
+    ///
+    /// 再生に入れるのは CH5 上段だけなので、「歩行要求で中断」にしていると
+    /// トリガの次の周期で必ず抜ける。実機では手を振る前に立ち姿勢へ帰って
+    /// いた（振り幅ゼロ）。`jump` は 0.5 + 0.4 + 0.1 s。
+    #[test]
+    fn a_pose_plays_to_the_end_while_the_switch_stays_up() {
+        let t = play_pose_seconds("jump", &cmd(ModeRequest::Walk));
+        assert!(
+            t > 0.9,
+            "CH5 上段のまま {t} s で再生が打ち切られています（シーケンスは 1.0 s）"
+        );
+    }
+
+    /// 前足を振る `wave_fr` / `wave_fl` も同じく最後まで通ること。
+    /// 8 ステップで 3.8 s ある。
+    #[test]
+    fn the_wave_sequences_play_to_the_end() {
+        for seq in ["wave_fr", "wave_fl"] {
+            let t = play_pose_seconds(seq, &cmd(ModeRequest::Walk));
+            assert!(t > 3.5, "{seq} が {t} s で打ち切られています（3.8 s ある）");
+        }
+    }
+
+    /// **CH5 を中段へ戻したら途中でも立ち姿勢へ戻る。**
+    #[test]
+    fn the_middle_switch_position_interrupts_the_pose() {
+        let t = play_pose_seconds("wave_fr", &cmd(ModeRequest::Stand));
+        assert!(t < 0.05, "CH5 中段で中断できていません（{t} s 続きました）");
     }
 }
